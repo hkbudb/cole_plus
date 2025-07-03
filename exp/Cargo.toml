@@ -1,0 +1,32 @@
+[package]
+name = "exp"
+version = "0.1.0"
+edition = "2021"
+
+# See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
+
+[[bin]]
+name = "latency"
+
+[[bin]]
+name = "prov"
+
+[lib]
+name = "locallib"
+path = "src/lib.rs"
+
+[dependencies]
+eth-execution-engine = { version = "0.1.0", path = "../eth-execution-engine" }
+patricia-trie = { version = "0.1.0", path = "../patricia-trie" }
+cole-index = { version = "0.1.0", path = "../cole-index" }
+cole-plus = { version = "0.1.0", path = "../cole-plus" }
+cole-plus-async = { version = "0.1.0", path = "../cole-plus-async" }
+cole-star = { version = "0.1.0", path = "../cole-star" }
+utils = { version = "0.1.0", path = "../utils" }
+anyhow = { version = "1.0", default-features = false }
+rocksdb = "0.22.0"
+rand = "0.7"
+json = "0.12.4"
+bincode = "1.3.3"
+chrono = "0.4.24"
+primitive-types = { version = "0.10.1", features = ["serde"] }

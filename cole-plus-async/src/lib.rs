@@ -1,0 +1,847 @@
+pub mod async_level;
+use async_level::AsyncLevel;
+use cole_plus::{in_memory_postree::InMemoryPOSTree, run::{LevelRun, reconstruct_run_proof, RunFilterSize}, RunProofOrHash};
+use pattern_oridented_split_tree::{traits::POSTreeNodeIO, POSTreeRangeProof};
+use std::thread::JoinHandle;
+use utils::{cacher::CacheManager, config::Configs, pager::{cdc_mht::{CDCTreeReader, VerObject}, state_pager::{StateIterator, StatePageReader}, upper_mht::UpperMHTReader}, types::{compute_concatenate_hash, AddrKey, CompoundKey, StateValue}, MemCost, OpenOptions, Read, Write};
+use primitive_types::H256;
+use std::fmt::{Debug, Formatter, Error};
+use serde::{Serialize, Deserialize};
+pub const EVAL_STORAGE_AFTER_DROP: bool = true;
+use utils::DEFAULT_MAX_NODE_CAPACITY;
+pub struct InMemGroup {
+    pub mem_mht: InMemoryPOSTree, // in-mem POS-Tree
+    pub thread_handle: Option<JoinHandle<LevelRun>>, // object related to the asynchronous merge thread,
+}
+
+impl Debug for InMemGroup {
+    fn fmt(&self, _: &mut Formatter<'_>) -> Result<(), Error> {
+        println!("mem mht: {:?}", self.mem_mht);
+        println!("thread is some: {}", self.thread_handle.is_some());
+        Ok(())
+    }
+}
+
+impl InMemGroup {
+    pub fn new(exp_fanout: usize, max_fanout: usize) -> Self {
+        Self {
+            mem_mht: InMemoryPOSTree::new(exp_fanout, max_fanout),
+            thread_handle: None,
+        }
+    }
+    pub fn clear(&mut self) {
+        self.mem_mht.clear();
+        self.thread_handle = None;
+    }
+}
+
+pub struct ColePlusAsync<'a> {
+    pub configs: &'a Configs,
+    pub in_mem_group: [InMemGroup; 2],
+    pub in_mem_write_group_flag: bool,
+    pub levels: Vec<AsyncLevel>,
+    pub run_id_cnt: u32, // this helps generate a new run_id
+    pub cache_manager: CacheManager,
+}
+
+impl<'a> ColePlusAsync<'a> {
+    // create a new index using configs,
+    pub fn new(configs: &'a Configs) -> Self {
+        Self {
+            configs,
+            in_mem_group: [InMemGroup::new(configs.fanout, DEFAULT_MAX_NODE_CAPACITY), InMemGroup::new(configs.fanout, DEFAULT_MAX_NODE_CAPACITY)],
+            in_mem_write_group_flag: true,
+            levels: Vec::new(), // empty levels' vector
+            run_id_cnt: 0, // initiate the counter to be 0
+            cache_manager: CacheManager::new(),
+        }
+    }
+
+    fn get_tree_meta_path(&self) -> String {
+        format!("{}/mht", &self.configs.dir_name)
+    }
+
+    pub fn get_write_in_mem_group_index(&self) -> usize {
+        if self.in_mem_write_group_flag == true {
+            // the first in_mem group is the write group
+            0
+        } else {
+            // the second in_mem group is the write group
+            1
+        }
+    }
+
+    pub fn get_merge_in_mem_group_index(&self) -> usize {
+        if self.in_mem_write_group_flag == true {
+            // the second in_mem group is the merge group
+            1
+        } else {
+            // the first in_mem group is the merge group
+            0
+        }
+    }
+
+    fn get_meta(&mut self) -> usize {
+        let path = self.get_tree_meta_path();
+        let mut file = OpenOptions::new().create(true).read(true).write(true).open(&path).unwrap();
+        // read level len
+        let mut level_len_bytes = [0u8; 4];
+        let mut level_len: u32 = 0;
+        match file.read_exact(&mut level_len_bytes) {
+            Ok(_) => {
+                level_len = u32::from_be_bytes(level_len_bytes);
+            },
+            Err(_) => {}
+        }
+        // read run_id_cnt
+        let mut run_id_cnt_bytes = [0u8; 4];
+        let mut run_id_cnt: u32 = 0;
+        match file.read_exact(&mut run_id_cnt_bytes) {
+            Ok(_) => {
+                run_id_cnt = u32::from_be_bytes(run_id_cnt_bytes);
+            },
+            Err(_) => {}
+        }
+        self.run_id_cnt = run_id_cnt;
+        // read mem mht in the write group
+        let mut write_mht_len_bytes = [0u8; 4];
+        let mut write_mht_len = 0;
+        match file.read_exact(&mut write_mht_len_bytes) {
+            Ok(_) => {
+                write_mht_len = u32::from_be_bytes(write_mht_len_bytes);
+            },
+            Err(_) => {}
+        }
+        let mut write_mht_bytes = vec![0u8; write_mht_len as usize];
+        let write_index = self.get_write_in_mem_group_index();
+        match file.read_exact(&mut write_mht_bytes) {
+            Ok(_) => {
+                self.in_mem_group[write_index].mem_mht = bincode::deserialize(&write_mht_bytes).unwrap();
+            },
+            Err(_) => {},
+        }
+        // read mem mht in the merge group
+        let mut merge_mht_len_bytes = [0u8; 4];
+        let mut merge_mht_len = 0;
+        match file.read_exact(&mut merge_mht_len_bytes) {
+            Ok(_) => {
+                merge_mht_len = u32::from_be_bytes(merge_mht_len_bytes);
+            },
+            Err(_) => {}
+        }
+        let mut merge_mht_bytes = vec![0u8; merge_mht_len as usize];
+        let merge_index = self.get_merge_in_mem_group_index();
+        match file.read_exact(&mut merge_mht_bytes) {
+            Ok(_) => {
+                self.in_mem_group[merge_index].mem_mht = bincode::deserialize(&merge_mht_bytes).unwrap();
+            },
+            Err(_) => {},
+        }
+        return level_len as usize;
+    }
+
+    fn update_manifest(&self) {
+        // first persist all levels
+        for level in &self.levels {
+            level.persist_level(&self.configs);
+        }
+        // persist level len
+        let level_len = self.levels.len() as u32;
+        let mut bytes = level_len.to_be_bytes().to_vec();
+        // persist run_id_cnt
+        let run_id_cnt = self.run_id_cnt;
+        bytes.extend(run_id_cnt.to_be_bytes());
+        // serialize write in_mem mht
+        let write_index = self.get_write_in_mem_group_index();
+        let write_mht_bytes = bincode::serialize(&self.in_mem_group[write_index].mem_mht).unwrap();
+        let write_mht_len = write_mht_bytes.len() as u32;
+        bytes.extend(write_mht_len.to_be_bytes());
+        bytes.extend(&write_mht_bytes);
+        // serialize merge in_mem mht
+        let merge_index = self.get_merge_in_mem_group_index();
+        let merge_mht_bytes = bincode::serialize(&self.in_mem_group[merge_index].mem_mht).unwrap();
+        let merge_mht_len = merge_mht_bytes.len() as u32;
+        bytes.extend(merge_mht_len.to_be_bytes());
+        bytes.extend(&merge_mht_bytes);
+        // persist the bytes to the manifest file
+        let path = self.get_tree_meta_path();
+        let mut file = OpenOptions::new().create(true).read(true).write(true).truncate(true).open(&path).unwrap();
+        file.write_all(&mut bytes).unwrap();
+    }
+
+    // load a new index using configs
+    pub fn load(configs: &'a Configs) -> Self {
+        let mut ret = Self::new(configs);
+        let level_len = ret.get_meta();
+        // load levels
+        for i in 0..level_len {
+            let level = AsyncLevel::load(i as u32, configs);
+            ret.levels.push(level);
+        }
+        return ret;
+    }
+
+    fn new_run_id(&mut self) -> u32 {
+        // increment the run_id and return it
+        self.run_id_cnt += 1;
+        return self.run_id_cnt;
+    }
+
+    fn switch_in_mem_group(&mut self) {
+        // reverse the flag of write group
+        if self.in_mem_write_group_flag == true {
+            self.in_mem_write_group_flag = false;
+        } else {
+            self.in_mem_write_group_flag = true;
+        }
+    }
+
+    // add the new run to the level's write group with level_id
+    fn add_run_to_level_write_group(&mut self, level_id: u32, new_run: LevelRun) {
+        match self.levels.get_mut(level_id as usize) {
+            Some(level_ref) => {
+                let write_index = level_ref.get_write_group_index();
+                level_ref.run_groups[write_index].run_vec.push(new_run); 
+                // level_ref.run_groups[write_index].run_vec.insert(0, new_run); // always insert the new run to the front, so that the latest states are at the front of the level
+            },
+            None => {
+                let mut level = AsyncLevel::new(level_id); // the level with level_id does not exist, so create a new one
+                let write_index = level.get_write_group_index();
+                level.run_groups[write_index].run_vec.push(new_run);
+                // level.run_groups[write_index].run_vec.insert(0, new_run);
+                self.levels.push(level); // push the new level to the level vector
+            }
+        }
+    }
+
+    fn prepare_thread_input(&mut self, level_id: u32) -> (u32, String, usize, usize, usize, usize, bool) {
+        let new_run_id = self.new_run_id();
+        let dir_name = self.configs.dir_name.clone();
+        let fanout = self.configs.fanout;
+        let size_ratio = self.configs.size_ratio;
+        let max_num_of_states = self.configs.max_num_of_states_in_a_run(level_id);
+        let level_num_of_run = match self.levels.get(level_id as usize) {
+            Some(level) => {
+                let write_index = level.get_write_group_index();
+                level.run_groups[write_index].run_vec.len()
+            },
+            None => 0
+        };
+        let is_pruned = self.configs.is_pruned;
+        (new_run_id, dir_name, fanout, max_num_of_states, level_num_of_run, size_ratio, is_pruned)
+    }
+
+    pub fn insert(&mut self, state: (AddrKey, u32, StateValue)) {
+        let (addr_key, ver, value) = state;
+        // compute the in-memory threshold
+        let in_mem_thres = (self.configs.base_state_num as f64 * 0.5) as usize;
+        // get the write in_mem group index
+        let write_index = self.get_write_in_mem_group_index();
+        // insert the state to the tree of write group
+        let tree_ref = &mut self.in_mem_group[write_index].mem_mht;
+        pattern_oridented_split_tree::insert(tree_ref, CompoundKey::new(addr_key, ver), value);
+        // check wheither the write group tree is full
+        if tree_ref.key_num as usize == in_mem_thres {
+            // get the merge group index
+            let merge_index = self.get_merge_in_mem_group_index();
+            let level_id = 0; // the first on-disk level's id is 0
+            // check if the merge group has thread
+            if let Some(handle) = self.in_mem_group[merge_index].thread_handle.take() {
+                // get the merged new run
+                let new_run = handle.join().unwrap();
+                // add the new run to the first disk level's write group
+                self.add_run_to_level_write_group(level_id, new_run);
+                // clear the mb-tree of the merge group and set thread_handle to be None
+                self.in_mem_group[merge_index].clear();
+            }
+            // switch the write group and merge group
+            self.switch_in_mem_group();
+            // get the updated merge index
+            let merge_index = self.get_merge_in_mem_group_index();
+            // merge group is full, the data should be merged to the run in the disk-level
+            let state_vec = self.in_mem_group[merge_index].mem_mht.load_all_key_values();
+            // prepare for the thread input
+            let (new_run_id, dir_name, fanout, max_num_of_states, level_num_of_run, size_ratio, is_pruned) = self.prepare_thread_input(level_id);
+            // create a merge thread
+            let handle = std::thread::spawn(move|| {
+                let run = LevelRun::construct_run_by_in_memory_collection(state_vec, new_run_id, level_id, &dir_name, fanout, max_num_of_states, level_num_of_run, size_ratio, is_pruned);
+                return run;
+            });
+            // assign the thread_handle to the merge group
+            self.in_mem_group[merge_index].thread_handle = Some(handle);
+            // check and merge the disk levels
+            self.check_and_merge();
+        }
+    }
+
+    fn check_and_merge(&mut self) {
+        let mut level_id = 0; // start from 0 disk level
+        // iteratively check each level's write group is full or not
+        while level_id < self.levels.len() {
+            if self.levels[level_id].level_write_group_reach_capacity(&self.configs) {
+                // get the merge group's index
+                let merge_index = self.levels[level_id].get_merge_group_index();
+                // get the next level id
+                let next_level_id = level_id + 1;
+                // check whether the merge group has thread_handle
+                if let Some(handle) = self.levels[level_id].run_groups[merge_index].thread_handle.take() {
+                    // get the merged new run
+                    let new_run = handle.join().unwrap();
+                    // add the new run to the next level
+                    self.add_run_to_level_write_group(next_level_id as u32, new_run);
+                    let merge_group_ref = &mut self.levels[level_id as usize].run_groups[merge_index];
+                    // set the thread_handle to be None
+                    merge_group_ref.thread_handle = None;
+                    // remove all the runs in the merge group in levels[level_id]
+                    let run_id_vec: Vec<u32> = merge_group_ref.run_vec.drain(..).map(|run| run.run_id).collect();
+                    // remove the merged files in level_id by using multi-threads; note that we do not need to wait for the ending of the thread.
+                    AsyncLevel::remove_run_files(run_id_vec, level_id as u32, &self.configs.dir_name);
+                }
+                // switch the write group and merge group
+                self.levels[level_id].switch_group();
+                // get the updated merge group index
+                let merge_index = self.levels[level_id].get_merge_group_index();
+                // prepare for run_ids of the merged runs, which will be used during the background merge thread
+                let merge_group_run_id_vec: Vec<u32> = self.levels[level_id].run_groups[merge_index].run_vec.iter().map(|run| run.run_id).collect();
+                // prepare for the input parameters of the merging thread
+                let (new_run_id, dir_name, fanout, max_num_of_states, level_num_of_run, size_ratio, is_pruned) = self.prepare_thread_input(next_level_id as u32);
+                let handle = std::thread::spawn(move|| {
+                    let mut state_iters = Vec::<StateIterator>::new();
+                    let mut lower_cdc_tree_readers = Vec::<CDCTreeReader>::new();
+                    let mut upper_mht_readers: Vec::<(u32, UpperMHTReader)> = Vec::<(u32, UpperMHTReader)>::new();
+                    for merge_run_id in merge_group_run_id_vec {
+                        let state_file_name = LevelRun::file_name(merge_run_id, level_id as u32, &dir_name, "s");
+                        let upper_offset_file_name = LevelRun::file_name(merge_run_id, level_id as u32,  &dir_name, "uo");
+                        let upper_hash_file_name = LevelRun::file_name(merge_run_id, level_id as u32,  &dir_name, "uh");
+                        let lower_cdc_file_name = LevelRun::file_name(merge_run_id, level_id as u32,  &dir_name, "lh");
+                        let state_iter = StatePageReader::load(&state_file_name).to_state_iter();
+                        state_iters.push(state_iter);
+                        let lower_cdc_tree_reader = CDCTreeReader::new(&lower_cdc_file_name);
+                        lower_cdc_tree_readers.push(lower_cdc_tree_reader);
+                        let upper_mht_reader = UpperMHTReader::new(&upper_offset_file_name, &upper_hash_file_name);
+                        upper_mht_readers.push((merge_run_id, upper_mht_reader));
+                    }
+                    let new_run = LevelRun::construct_run_by_merge(state_iters, lower_cdc_tree_readers, upper_mht_readers, new_run_id, next_level_id as u32, &dir_name, fanout, max_num_of_states, level_num_of_run, size_ratio, is_pruned);
+                    return new_run;
+                });
+                // assign the merge thread handle to level_id's merge group
+                self.levels[level_id].run_groups[merge_index].thread_handle = Some(handle);
+                level_id += 1;
+            } else {
+                break;
+            }
+        }
+    }
+
+    pub fn search_latest_state_value(&mut self, addr_key: AddrKey) -> Option<(AddrKey, u32, StateValue)> {
+        // compute the boundary compound key
+        let upper_key = CompoundKey {
+            addr: addr_key,
+            version: u32::MAX,
+        };
+        // search the write-group in-mem tree
+        let write_index = self.get_write_in_mem_group_index();
+        let write_tree = &mut self.in_mem_group[write_index].mem_mht;
+        match pattern_oridented_split_tree::search_with_upper_key(write_tree, upper_key) {
+            Some((read_key, read_v)) => {
+                if read_key.addr == addr_key {
+                    // matches the addresses and should be the latest value since latest value should be in the upper levels
+                    return Some((read_key.addr, read_key.version, read_v));
+                }
+            },
+            None => {},
+        }
+        // search the merge-group in-mem tree 
+        let merge_index = self.get_merge_in_mem_group_index();
+        let merge_tree = &mut self.in_mem_group[merge_index].mem_mht;
+        match pattern_oridented_split_tree::search_with_upper_key(merge_tree, upper_key) {
+            Some((read_key, read_v)) => {
+                if read_key.addr == addr_key {
+                    // matches the addresses and should be the latest value since latest value should be in the upper levels
+                    return Some((read_key.addr, read_key.version, read_v));
+                }
+            },
+            None => {},
+        }
+        // search other levels on the disk
+        for level in &mut self.levels {
+            // first search the write group
+            let write_index = level.get_write_group_index();
+            for run in level.run_groups[write_index].run_vec.iter_mut().rev() {
+                let res = run.search_run(&upper_key, &mut self.cache_manager);
+                if let Some(inner_res) = res {
+                    if inner_res.0 == addr_key {
+                        return Some(inner_res);
+                    }
+                }
+            }
+            // then search the merge group
+            let merge_index = level.get_merge_group_index();
+            for run in level.run_groups[merge_index].run_vec.iter_mut().rev() {
+                let res = run.search_run(&upper_key, &mut self.cache_manager);
+                if let Some(inner_res) = res {
+                    if inner_res.0 == addr_key {
+                        return Some(inner_res);
+                    }
+                }
+            }
+        }
+        return None;
+    }
+
+    pub fn search_with_proof(&mut self, addr_key: AddrKey, lb: u32, ub: u32) -> ColePlusAsyncProof {
+        let mut proof = ColePlusAsyncProof::new();
+        // generate the two compound keys
+        let low_key = CompoundKey::new(addr_key, lb);
+        let upper_key = CompoundKey::new(addr_key, ub);
+        let mut rest_is_hash = false;
+        // search the write group of the in-memory tree
+        let write_index = self.get_write_in_mem_group_index();
+        let (r, p) = pattern_oridented_split_tree::get_range_proof(&mut self.in_mem_group[write_index].mem_mht, low_key, upper_key);
+        if r.is_some() {
+            // check if the left_most version is smaller than the low_version, it means all the digests of the rest of the runs should be added to the proof
+            // there is no need to prove_range the run
+            let left_most_result = r.as_ref().unwrap()[0].0;
+            let result_version = left_most_result.version;
+            if result_version < lb {
+                rest_is_hash = true;
+            }
+        }
+        // include the result and proof of write group
+        proof.in_mem_level.set_write_group(r, p);
+        // search the merge group of the in-memory tree
+        let merge_index = self.get_merge_in_mem_group_index();
+        let (r, p) = pattern_oridented_split_tree::get_range_proof(&mut self.in_mem_group[merge_index].mem_mht, low_key, upper_key);
+        if r.is_some() {
+            // check if the left_most version is smaller than the low_version, it means all the digests of the rest of the runs should be added to the proof
+            // there is no need to prove_range the run
+            let left_most_result = r.as_ref().unwrap()[0].0;
+            let result_version = left_most_result.version;
+            if result_version < lb {
+                rest_is_hash = true;
+            }
+        }
+        // include the result and proof of merge group
+        proof.in_mem_level.set_merge_group(r, p);
+
+        let mut disk_level_vec = Vec::new();
+        // search the runs in all disk levels
+        for level in &mut self.levels {
+            let mut level_proof = ColePlusAsyncLevelProof::new();
+            // write group
+            let write_index = level.get_write_group_index();
+            for run in level.run_groups[write_index].run_vec.iter_mut().rev() {
+                // decide to add the run's proof or the run's digest
+                if rest_is_hash == false {
+                    let (r, p) = run.prove_range(addr_key, lb, ub, &self.configs, &mut self.cache_manager);
+                    if r.is_some() {
+                        // check if the left_most version is smaller than the low_version, it means all the digests of the rest of the runs should be added to the proof
+                        // there is no need to prove_range the run
+                        let left_most_result = &r.as_ref().unwrap()[0];
+                        let result_version = left_most_result.ver;
+                        if result_version < lb {
+                            rest_is_hash = true;
+                        }
+                    }
+                    level_proof.push_to_write_group(r, RunProofOrHash::Proof(p));
+                } else {
+                    level_proof.push_to_write_group(None, RunProofOrHash::Hash(run.digest));
+                }
+            }
+            // merge group
+            let merge_index = level.get_merge_group_index();
+            for run in level.run_groups[merge_index].run_vec.iter_mut().rev() {
+                // decide to add the run's proof or the run's digest
+                if rest_is_hash == false {
+                    let (r, p) = run.prove_range(addr_key, lb, ub, &self.configs, &mut self.cache_manager);
+                    if r.is_some() {
+                        // check if the left_most version is smaller than the low_version, it means all the digests of the rest of the runs should be added to the proof
+                        // there is no need to prove_range the run
+                        let left_most_result = &r.as_ref().unwrap()[0];
+                        let result_version = left_most_result.ver;
+                        if result_version < lb {
+                            rest_is_hash = true;
+                        }
+                    }
+                    level_proof.push_to_merge_group(r, RunProofOrHash::Proof(p));
+                } else {
+                    level_proof.push_to_merge_group(None, RunProofOrHash::Hash(run.digest));
+                }
+            }
+            // add the level_proof to disk_level_vec
+            disk_level_vec.push(level_proof);
+        }
+        // add the disk level's proofs to the proof
+        proof.disk_level = disk_level_vec;
+        return proof;
+    }
+
+    // compute the digest of COLE*
+    pub fn compute_digest(&self) -> H256 {
+        let mut hash_vec = vec![];
+        // collect the write and merge group of in_mem_mht
+        let write_index = self.get_write_in_mem_group_index();
+        hash_vec.push(self.in_mem_group[write_index].mem_mht.get_root_hash());
+        let merge_index = self.get_merge_in_mem_group_index();
+        hash_vec.push(self.in_mem_group[merge_index].mem_mht.get_root_hash());
+        let disk_hash_vec: Vec<H256> = self.levels.iter().map(|level| level.compute_digest()).collect();
+        hash_vec.extend(&disk_hash_vec);
+        compute_concatenate_hash(&hash_vec)
+    }
+
+    // compute filter cost
+    pub fn filter_cost(&self) -> RunFilterSize {
+        let mut filter_size = RunFilterSize::new(0);
+        for level in &self.levels {
+            filter_size.add(&level.filter_cost());
+        }
+        return filter_size;
+    }
+
+    pub fn memory_cost(&self) -> MemCost {
+        let filter_size = self.filter_cost().filter_size;
+        // let cache_size = self.cache_manager.compute_cacher_size();
+        let write_index = self.get_write_in_mem_group_index();
+        let write_mht_bytes = bincode::serialize(&self.in_mem_group[write_index].mem_mht).unwrap();
+        let write_mht_len = write_mht_bytes.len();
+        let merge_index = self.get_merge_in_mem_group_index();
+        let merge_mht_bytes = bincode::serialize(&self.in_mem_group[merge_index].mem_mht).unwrap();
+        let merge_mht_len = merge_mht_bytes.len();
+        let mht_size = write_mht_len + merge_mht_len;
+        MemCost::new(0, filter_size, mht_size)
+    }
+}
+
+impl<'a> Drop for ColePlusAsync<'a> {
+    fn drop(&mut self) {
+        if EVAL_STORAGE_AFTER_DROP == false {
+            // first handle the in mem level's merge thread
+            let merge_index = self.get_merge_in_mem_group_index();
+            let mut level_id = 0;
+            if let Some(handle) = self.in_mem_group[merge_index].thread_handle.take() {
+                // get the merged new run
+                let new_run = handle.join().unwrap();
+                // add the new run to the first disk level's write group
+                self.add_run_to_level_write_group(level_id as u32, new_run);
+                // clear the mb-tree of the merge group and set thread_handle to be None
+                self.in_mem_group[merge_index].clear();
+            }
+            // then handle the disk level's merge thread, note that here we do not need to care about whether the write group is full or not after committing the merge thread
+            while level_id < self.levels.len() {
+                // get the merge group's index
+                let merge_index = self.levels[level_id].get_merge_group_index();
+                // get the next level id
+                let next_level_id = level_id + 1;
+                // check whether the merge group has thread_handle
+                if let Some(handle) = self.levels[level_id].run_groups[merge_index].thread_handle.take() {
+                    // get the merged new run
+                    let new_run = handle.join().unwrap();
+                    // add the new run to the next level
+                    self.add_run_to_level_write_group(next_level_id as u32, new_run);
+                    let merge_group_ref = &mut self.levels[level_id as usize].run_groups[merge_index];
+                    // set the thread_handle to be None
+                    merge_group_ref.thread_handle = None;
+                    // remove all the runs in the merge group in levels[level_id]
+                    let run_id_vec: Vec<u32> = merge_group_ref.run_vec.drain(..).map(|run| run.run_id).collect();
+                    // remove the merged files in level_id by using multi-threads; note that we do not need to wait for the ending of the thread.
+                    AsyncLevel::remove_run_files(run_id_vec, level_id as u32, &self.configs.dir_name);
+                }
+                level_id += 1;
+            }
+        }
+        // lastly persist the manifest
+        self.update_manifest();
+    }
+}
+
+#[derive(Debug, Serialize, Deserialize, Clone)]
+pub struct ColePlusAsyncProof {
+    pub in_mem_level: ColePlusAsyncInMemProof,
+    pub disk_level: Vec<ColePlusAsyncLevelProof>,
+}
+
+impl ColePlusAsyncProof {
+    // initiate the cole-start's proof
+    pub fn new() -> Self {
+        Self {
+            in_mem_level: ColePlusAsyncInMemProof::new(),
+            disk_level: Vec::new(),
+        }
+    }
+}
+
+#[derive(Debug, Serialize, Deserialize, Clone)]
+pub struct ColePlusAsyncInMemProof {
+    pub write_group: (Option<Vec<(CompoundKey, StateValue)>>, POSTreeRangeProof<CompoundKey, StateValue>),
+    pub merge_group: (Option<Vec<(CompoundKey, StateValue)>>, POSTreeRangeProof<CompoundKey, StateValue>),
+}
+
+impl ColePlusAsyncInMemProof {
+    pub fn new() -> Self {
+        Self {
+            write_group: (None, POSTreeRangeProof::default()),
+            merge_group: (None, POSTreeRangeProof::default()),
+        }
+    }
+
+    pub fn set_write_group(&mut self, r: Option<Vec<(CompoundKey, StateValue)>>, p: POSTreeRangeProof<CompoundKey, StateValue>) {
+        self.write_group = (r, p);
+    }
+
+    pub fn set_merge_group(&mut self, r: Option<Vec<(CompoundKey, StateValue)>>, p: POSTreeRangeProof<CompoundKey, StateValue>) {
+        self.merge_group = (r, p);
+    }
+}
+
+#[derive(Debug, Serialize, Deserialize, Clone)]
+pub struct ColePlusAsyncLevelProof {
+    pub write_group: Vec<(Option<Vec<VerObject>>, RunProofOrHash)>,
+    pub merge_group: Vec<(Option<Vec<VerObject>>, RunProofOrHash)>,
+}
+
+impl ColePlusAsyncLevelProof {
+    pub fn new() -> Self {
+        Self {
+            write_group: Vec::new(),
+            merge_group: Vec::new(),
+        }
+    }
+
+    pub fn push_to_write_group(&mut self, r: Option<Vec<VerObject>>, p: RunProofOrHash) {
+        self.write_group.push((r, p));
+    }
+
+    pub fn push_to_merge_group(&mut self, r: Option<Vec<VerObject>>, p: RunProofOrHash) {
+        self.merge_group.push((r, p));
+    }
+}
+
+pub fn verify_and_collect_result(addr_key: AddrKey, lb: u32, ub: u32, root_hash: H256, proof: &ColePlusAsyncProof, fanout: usize) -> (bool, Option<Vec<VerObject>>) {
+    let mut level_roots = Vec::<H256>::new();
+    // first reconstruct the in_memory_proof
+    let low_key = CompoundKey::new(addr_key, lb);
+    let upper_key = CompoundKey::new(addr_key, ub);
+    // retrieve write group result and proof
+    let write_group_result = &proof.in_mem_level.write_group.0;
+    let write_group_proof = &proof.in_mem_level.write_group.1;
+    let h = pattern_oridented_split_tree::reconstruct_range_proof(low_key, upper_key, write_group_result, write_group_proof);
+    level_roots.push(h);
+    let mut merge_result: Vec<VerObject> = vec![];
+    let mut rest_is_hash = false;
+    if write_group_result.is_some() {
+        let left_most_result = write_group_result.as_ref().unwrap()[0].0;
+        let result_version = left_most_result.version;
+        if result_version < lb {
+            rest_is_hash = true;
+        }
+        let mut r: Vec<VerObject> = Vec::new();
+        for (k, v) in write_group_result.as_ref().unwrap() {
+            if k.addr == addr_key {
+                let ver = k.version;
+                let value = *v;
+                r.push(VerObject::new(ver, value));
+            }
+        }
+        merge_result.extend(r);
+    }
+    // then reconstruct merge group of the in-mem tree
+    // retrieve merge group result and proof
+    let merge_group_result = &proof.in_mem_level.merge_group.0;
+    let merge_group_proof = &proof.in_mem_level.merge_group.1;
+    let h = pattern_oridented_split_tree::reconstruct_range_proof(low_key, upper_key, merge_group_result, merge_group_proof);
+    level_roots.push(h);
+    if merge_group_result.is_some() {
+        let left_most_result = merge_group_result.as_ref().unwrap()[0].0;
+        let result_version = left_most_result.version;
+        if result_version < lb {
+            rest_is_hash = true;
+        }
+        let mut r: Vec<VerObject> = Vec::new();
+        for (k, v) in merge_group_result.as_ref().unwrap() {
+            if k.addr == addr_key {
+                let ver = k.version;
+                let value = *v;
+                r.push(VerObject::new(ver, value));
+            }
+        }
+        merge_result.extend(r);
+    }
+
+    for level in &proof.disk_level {
+        let mut level_write_h_vec: Vec<H256> = Vec::new();
+        let mut level_merge_h_vec: Vec<H256> = Vec::new();
+        let write_runs = &level.write_group;
+        let merge_runs = &level.merge_group;
+        for run in write_runs {
+            let r = &run.0;
+            let p = &run.1;
+            match p {
+                RunProofOrHash::Hash(h) => {
+                    if rest_is_hash == false {
+                        // in-complete result, return false
+                        return (false, None);
+                    }
+                    level_write_h_vec.push(*h);
+                },
+                RunProofOrHash::Proof(proof) => {
+                    if rest_is_hash == true {
+                        // in-complete result, return false
+                        return (false, None);
+                    }
+                    let h = reconstruct_run_proof(&addr_key, lb, ub, r, proof, fanout);
+                    level_write_h_vec.push(h);
+                }
+            }
+            if r.is_some() {
+                let left_most_result = &r.as_ref().unwrap()[0];
+                let result_version = left_most_result.ver;
+                if result_version < lb {
+                    rest_is_hash = true;
+                }
+                merge_result.extend_from_slice(r.as_ref().unwrap());
+            }
+        }
+
+        for run in merge_runs {
+            let r = &run.0;
+            let p = &run.1;
+            match p {
+                RunProofOrHash::Hash(h) => {
+                    if rest_is_hash == false {
+                        // in-complete result, return false
+                        return (false, None);
+                    }
+                    level_merge_h_vec.push(*h);
+                },
+                RunProofOrHash::Proof(proof) => {
+                    if rest_is_hash == true {
+                        // in-complete result, return false
+                        return (false, None);
+                    }
+                    let h = reconstruct_run_proof(&addr_key, lb, ub, r, proof, fanout);
+                    level_merge_h_vec.push(h);
+                }
+            }
+            if r.is_some() {
+                let left_most_result = &r.as_ref().unwrap()[0];
+                let result_version = left_most_result.ver;
+                if result_version < lb {
+                    rest_is_hash = true;
+                }
+                merge_result.extend_from_slice(r.as_ref().unwrap());
+            }
+        }
+        let mut total_run_hash_vec = vec![];
+        total_run_hash_vec.extend(level_write_h_vec);
+        total_run_hash_vec.extend(level_merge_h_vec);
+        let level_h = compute_concatenate_hash(&total_run_hash_vec);
+        level_roots.push(level_h);
+    }
+
+    let reconstruct_root = compute_concatenate_hash(&level_roots);
+    if reconstruct_root != root_hash {
+        return (false, None);
+    }
+    merge_result.sort_by(|a, b| a.ver.partial_cmp(&b.ver).unwrap());
+    merge_result = merge_result.into_iter().filter(|r| r.ver >= lb && r.ver <= ub).collect();
+    return (true, Some(merge_result));
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use primitive_types::{H160, H256};
+    use rand::{rngs::StdRng, SeedableRng};
+    use utils::types::{Address, StateKey};
+
+    #[test]
+    fn test_query_cole_plus_async() {
+        let num_of_contract = 100;
+        let num_of_addr = 500;
+        let num_of_version = 50;
+        let n = num_of_contract * num_of_addr * num_of_version;
+        let mut rng = StdRng::seed_from_u64(1);
+        let fanout = 5;
+        let dir_name = "cole_storage";
+        if std::path::Path::new(dir_name).exists() {
+            std::fs::remove_dir_all(dir_name).unwrap_or_default();
+        }
+        std::fs::create_dir(dir_name).unwrap_or_default();
+        let base_state_num = 45000;
+        let size_ratio = 2;
+        let configs = Configs::new(fanout, 0, dir_name.to_string(), base_state_num, size_ratio, false);
+        let mut state_vec = Vec::<(CompoundKey, StateValue)>::new();
+        let mut addr_key_vec = Vec::<AddrKey>::new();
+        for _ in 1..=num_of_contract {
+            for _ in 1..=num_of_addr {
+                let acc_addr = H160::random_using(&mut rng);
+                let state_addr = H256::random_using(&mut rng);
+                let addr_key = AddrKey::new(Address(acc_addr), StateKey(state_addr));
+                addr_key_vec.push(addr_key);
+            }
+        }
+        for k in 1..=num_of_version {
+            for (i, addr_key) in addr_key_vec.iter().enumerate() {
+                state_vec.push((CompoundKey::new(*addr_key, k * 2), StateValue(H256::from_low_u64_be( (k as u64 + i as u64) * 2))));
+            }
+        }
+
+        let mut cole_plus_async = ColePlusAsync::new(&configs);
+        let start = std::time::Instant::now();
+        for state in &state_vec {
+            cole_plus_async.insert((state.0.addr, state.0.version, state.1));
+        }
+        let elapse = start.elapsed().as_nanos();
+        println!("average insert: {:?}", elapse / n as u128);
+        println!("drop");
+        drop(cole_plus_async);
+        let mut cole_plus_async = ColePlusAsync::load(&configs);
+        println!("loaded");
+
+/*         let mut break_flag = false;
+        let digest = cole_plus_async.compute_digest();
+        let mut search_prove = 0;
+        for (i, addr) in addr_key_vec.iter().enumerate() {
+            for k in 1..=num_of_version {
+                let lb = k * 2 as u32;
+                let ub = k * 2 as u32;
+                let start = std::time::Instant::now();
+                let proof = cole_plus_async.search_with_proof(*addr, lb, ub);
+                let (b, r) = verify_and_collect_result(*addr, lb, ub, digest, &proof, fanout);
+                let elapse = start.elapsed().as_nanos();
+                search_prove += elapse;
+                if b == false {
+                    println!("addr: {:?}, lb: {}, ub: {}", addr, lb, ub);
+                    println!("verification fails");
+
+                    break_flag = true;
+                    break;
+                }
+                let true_r = (k * 2 as u32, StateValue(H256::from_low_u64_be((k as u64 + i as u64) * 2)));
+                let ver_obj = &r.unwrap()[0];
+
+                let retrieved_r = (ver_obj.ver, ver_obj.value);
+                if retrieved_r != true_r {
+                    println!("retrieved_r: {:?}, true_r: {:?}", retrieved_r, true_r);
+                }
+            }
+            if break_flag {
+                break;
+            }
+        }
+        
+        println!("avg search prove: {}", search_prove / (num_of_contract * num_of_addr * num_of_version) as u128); */
+
+        let start = std::time::Instant::now();
+        for (i, addr) in addr_key_vec.iter().enumerate() {
+            let r = cole_plus_async.search_latest_state_value(*addr).unwrap();
+            let true_value = StateValue(H256::from_low_u64_be((num_of_version as u64 + i as u64) * 2));
+            if r.2 != true_value {
+                println!("false addr: {:?}", addr);
+                println!("true value: {:?}, return r: {:?}", true_value, r);
+            }
+        }
+        let elapse = start.elapsed().as_nanos();
+        println!("average query latest: {:?}", elapse / addr_key_vec.len() as u128);
+    }
+}

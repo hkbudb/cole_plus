@@ -1,0 +1,27 @@
+[package]
+name = "benchmark"
+version = "0.1.0"
+edition = "2021"
+
+# See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
+
+[[bin]]
+name = "cole"
+
+[[bin]]
+name = "cole_plus"
+
+[[bin]]
+name = "postree"
+
+[[bin]]
+name = "rewind"
+
+[dependencies]
+cole-plus = { version = "0.1.0", path = "../cole-plus" }
+cole-index = { version = "0.1.0", path = "../cole-index" }
+utils = { version = "0.1.0", path = "../utils" }
+primitive-types = { version = "0.10.1", features = ["serde"] }
+rand = "0.8.4"
+pattern-oridented-split-tree = { version = "0.1.0", path = "../pattern-oridented-split-tree" }
+merkle-btree-storage = { version = "0.1.0", path = "../merkle-btree-storage" }

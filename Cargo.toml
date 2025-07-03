@@ -1,0 +1,19 @@
+[workspace]
+resolver = "2"
+
+members = [
+    "utils",
+    "merkle-btree-storage",
+    "cole-plus",
+    "growable-bloom-filters",
+    "eth-execution-engine",
+    "patricia-trie", 
+    "cole-index", 
+    "pattern-oridented-split-tree", 
+    "cdc-hash", 
+    "benchmark", 
+    "exp", 
+    "cole-star", 
+    "cole-plus-async", 
+    "letus_new",
+]
