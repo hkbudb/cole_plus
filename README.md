@@ -71,3 +71,9 @@ python3 run.py
 
 * Use functions like `test_overall_kvstore()` and `test_prov()` in `cole-plus/exp/run.py` to evaluate the workload of `KVStore` and provenance query performance.
 * You may select different scales `scale = [3000000, 6000000, 30000000, 60000000]` or different indexes `indexes = ["cole_star", "cole_plus_async_archive", "cole_plus_async_prune"]`
+
+## Check the Result
+
+The result `json` files can be found in each workload directory (e.g., writeonly, prov)
+* `*-storage.json` stores the storage information
+* `*-ts.json` stores the block timestamp information including start timestamp, end timestamp, and block latency, which can be used to compute the system throughput and latency
