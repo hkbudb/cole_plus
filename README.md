@@ -5,6 +5,8 @@
 - `cole-plus-async` and `cole-star` are COLE<sup>+</sup> and COLE with asynchronous merge functionality
 - `patricia-trie` is the implementation of MPT
 - `exp` is the evaluation backend of all systems including the throughput and the provenance queries
+- `cole-plus-ablation-siri` is an ablation version of `cole-plus` where the CDC method is replaced with Structurally Invariant and Reusable Indexes (SIRI)
+- `cole-ablation-layout` is an ablation version of `cole-star` that modifies the state file layout by separating the latest and historical states into different files
 
 ##  Install Dependencies
 
@@ -70,7 +72,7 @@ python3 run.py
 ```
 
 * Use functions like `test_overall_kvstore()` and `test_prov()` in `cole-plus/exp/run.py` to evaluate the workload of `KVStore` and provenance query performance.
-* You may select different scales `scale = [3000000, 6000000, 30000000, 60000000]` or different indexes `indexes = ["cole_star", "cole_plus_async_archive", "cole_plus_async_prune"]`
+* You may select different scales `scale = [3000000, 6000000, 30000000, 60000000]` or different indexes `indexes = ["cole_star", "cole_plus_async_archive", "cole_plus_async_prune", "cole_plus_ablation_siri", "cole_ablation_layout"]`
 
 ## Check the Result
 
