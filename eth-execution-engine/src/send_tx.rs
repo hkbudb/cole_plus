@@ -19,7 +19,7 @@ static YCSB_UPDATE_RE: Lazy<Regex> =
     Lazy::new(|| Regex::new(r"^UPDATE usertable (\w+) \[ field\d+=(.+) \]$").unwrap());
 static YCSB_WRITE_RE: Lazy<Regex> =
     Lazy::new(|| Regex::new(r"^INSERT usertable (\w+) \[ field\d+=(.+) \]$").unwrap());
-pub static EHT_FILE: OnceCell<Mutex<io::BufReader<File>>> = OnceCell::new();
+pub static ETH_FILE: OnceCell<Mutex<io::BufReader<File>>> = OnceCell::new();
 #[derive(Debug, Copy, Clone, Eq, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum ContractArg {
@@ -48,7 +48,7 @@ impl ContractArg {
         match self {
             ContractArg::KVStore => load_contract!("KVstore"),
             ContractArg::SmallBank => load_contract!("SmallBank"),
-            ContractArg::ETH => load_contract!("Transfer"),
+            ContractArg::ETH => load_contract!("ETH"),
         }
     }
 
@@ -56,7 +56,7 @@ impl ContractArg {
         match self {
             ContractArg::ETH => {
                 let contract = self.get_contract();
-                if let Some(eth) = EHT_FILE.get() {
+                if let Some(eth) = ETH_FILE.get() {
                     let mut eth = eth.lock().map_err(|_e| anyhow!("Failed to lock ETH file."))?;
                     let mut buf = String::new();
                     let buf_len = eth.read_line(&mut buf)?;
@@ -67,9 +67,7 @@ impl ContractArg {
                     let input_vec: Vec<&str> = buf.split(" ").collect();
                     let from_addr = input_vec[0];
                     let to_addr = input_vec[1];
-                    let value = input_vec[2];
-                    let value_num: u32 = value.parse::<u32>().unwrap();
-                    return contract.encode_tx_input("transfer", &[Token::String(from_addr.to_string()), Token::String(to_addr.to_string()), Token::Uint(value_num.into())]);
+                    return contract.encode_tx_input("operate", &[Token::String(from_addr.to_string()), Token::String(to_addr.to_string())]);
                 } else {
                     bail!("Failed to access ETH file.");
                 }
@@ -242,10 +240,10 @@ mod tests {
     }
 
     #[test]
-    fn test_read_file() {
-        let file_name = "file.dat";
-        EHT_FILE.set(Mutex::new(BufReader::new(File::open(file_name).unwrap()))).map_err(|_e| anyhow!("failed to set eth file")).unwrap();
-        if let Some(eth) = EHT_FILE.get() {
+    fn test_read_eth_file() {
+        let file_name = "TX-small.csv";
+        ETH_FILE.set(Mutex::new(BufReader::new(File::open(file_name).unwrap()))).map_err(|_e| anyhow!("failed to set eth file")).unwrap();
+        if let Some(eth) = ETH_FILE.get() {
             loop {
                 let mut eth = eth.lock().map_err(|_e| anyhow!("Failed to lock ETH file.")).unwrap();
                 let mut buf = String::new();
@@ -258,9 +256,7 @@ mod tests {
                 let input_vec: Vec<&str> = buf.split(" ").collect();
                 let from_addr = input_vec[0];
                 let to_addr = input_vec[1];
-                let value = input_vec[2];
-                let value_num: u32 = value.parse::<u32>().unwrap();
-                println!("from: {:?}, to: {:?}, value: {:?}", from_addr, to_addr, value_num);
+                println!("from: {:?}, to: {:?}", from_addr, to_addr);
             }
         } else {
             println!("fail to access ETH file");

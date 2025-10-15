@@ -1,9 +1,11 @@
 use eth_execution_engine::common::write_trait::BackendWriteTrait;
 use eth_execution_engine::letus_backend::LetusBackend;
-use eth_execution_engine::send_tx::{create_deploy_tx, create_call_tx, ContractArg, YCSB};
+use eth_execution_engine::send_tx::{create_call_tx, create_deploy_tx, ContractArg, ETH_FILE, YCSB};
 use eth_execution_engine::tx_executor::{exec_tx, batch_exec_tx, Backend};
 use eth_execution_engine::common::{tx_req::TxRequest, nonce::Nonce};
 use eth_execution_engine::{mpt_backend::MPTExecutorBackend, cole_index_backend::ColeIndexBackend, cole_plus_backend::ColePlusBackend, cole_star_backend::ColeStarBackend, cole_plus_async_backend::ColePlusAsyncBackend};
+use eth_execution_engine::cole_plus_ablation_siri_backend::ColePlusSIRIBackend;
+use eth_execution_engine::cole_ablation_layout_backend::ColeAblationLayoutBackend;
 use utils::{types::Address, config::Configs};
 use rand::prelude::*;
 use rocksdb::{OptimisticTransactionDB, Options, SingleThreaded};
@@ -22,6 +24,7 @@ pub struct LatencyParams {
     pub scale: usize,
     pub ycsb_path: String,
     pub ycsb_base_row_number: usize,
+    pub eth_path: String,
     pub num_of_contract: usize,
     pub tx_in_block: usize,
     pub db_path: String,
@@ -60,6 +63,9 @@ impl LatencyParams {
         }
         if json_data.has_key("ycsb_base_row_number") {
             params.ycsb_base_row_number = json_data["ycsb_base_row_number"].as_usize().unwrap();
+        }
+        if json_data.has_key("eth_path") {
+            params.eth_path = json_data["eth_path"].to_string();
         }
         if json_data.has_key("num_of_contract") {
             params.num_of_contract = json_data["num_of_contract"].as_usize().unwrap();
@@ -100,7 +106,13 @@ pub fn test_backend_latency(params: &LatencyParams, mut backend: (impl BackendWr
         let yscb_path = &params.ycsb_path;
         let file = OpenOptions::new().read(true).open(yscb_path).unwrap();
         YCSB.set(Mutex::new(BufReader::new(file))).map_err(|_e| anyhow!("Failed to set YCSB.")).unwrap();
-    } else {
+    } else if contract_name == "eth" {
+        contract_arg = ContractArg::ETH;
+        let eth_path = &params.eth_path;
+        let file = OpenOptions::new().read(true).open(eth_path).unwrap();
+        ETH_FILE.set(Mutex::new(BufReader::new(file))).map_err(|_e| anyhow!("Failed to set ETH.")).unwrap();
+    }
+    else {
         return Err(anyhow!("wrong smart contract"));
     }
 
@@ -339,6 +351,34 @@ pub fn test_letus_backend_latency(params: &LatencyParams) -> Result<()> {
     Ok(())
 }
 
+pub fn test_cole_plus_ablation_siri_backend_latency(params: &LatencyParams) -> Result<()> {
+    let db_path = params.db_path.as_str();
+    if Path::new(db_path).exists() {
+        std::fs::remove_dir_all(db_path).unwrap_or_default();
+    }
+    std::fs::create_dir(db_path).unwrap_or_default();
+
+    // note that here the mem_size is the number of records in the memory, rather than the actual size like 64 MB
+    let configs = Configs::new(params.mht_fanout, params.epsilon as i64, db_path.to_string(), params.mem_size, params.size_ratio, false);
+    let backend = ColePlusSIRIBackend::new(&configs, db_path);
+    test_backend_latency(params, backend).unwrap();
+    Ok(())
+}
+
+pub fn test_cole_ablation_layout_backend_latency(params: &LatencyParams) -> Result<()> {
+    let db_path = params.db_path.as_str();
+    if Path::new(db_path).exists() {
+        std::fs::remove_dir_all(db_path).unwrap_or_default();
+    }
+    std::fs::create_dir(db_path).unwrap_or_default();
+
+    // note that here the mem_size is the number of records in the memory, rather than the actual size like 64 MB
+    let configs = Configs::new(params.mht_fanout, params.epsilon as i64, db_path.to_string(), params.mem_size, params.size_ratio, false);
+    let backend = ColeAblationLayoutBackend::new(&configs, db_path);
+    test_backend_latency(params, backend).unwrap();
+    Ok(())
+}
+
 pub fn test_index_backend_latency(params: &LatencyParams) -> Result<()> {
     let index_name = &params.index_name;
     if index_name == "mpt_archive" {
@@ -361,6 +401,10 @@ pub fn test_index_backend_latency(params: &LatencyParams) -> Result<()> {
         test_cole_plus_async_backend_latency(params, true)
     } else if index_name == "letus" {
         test_letus_backend_latency(params)
+    } else if index_name == "cole_plus_ablation_siri" {
+        test_cole_plus_ablation_siri_backend_latency(params)
+    } else if index_name == "cole_ablation_layout" {
+        test_cole_ablation_layout_backend_latency(params)
     }
     else {
         Err(anyhow!("wrong index name"))

@@ -43,7 +43,13 @@ pub fn compute_cole_size_breakdown(path: &str) -> ColeStorageSize {
         else if line.starts_with("s_") {
             state_size += disk_usage_check_storage(path, line);
         }
+        else if line.starts_with("ls_") {
+            state_size += disk_usage_check_storage(path, line);
+        }
         else if line.starts_with("m_") {
+            model_size += disk_usage_check_storage(path, line);
+        }
+        else if line.starts_with("lm_") {
             model_size += disk_usage_check_storage(path, line);
         }
         else if line.starts_with("h_") {

@@ -15,5 +15,8 @@ members = [
     "exp", 
     "cole-star", 
     "cole-plus-async", 
-    "letus_new",
+    "letus_new", 
+    "poly-rolling", 
+    "siri-tree", 
+    "cole-plus-ablation-siri", "cole-ablation-layout",
 ]

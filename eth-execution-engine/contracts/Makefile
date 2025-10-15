@@ -6,7 +6,8 @@ TARGET = \
 	build/contracts/Nothing.json \
 	build/contracts/SimpleStorage.json \
 	build/contracts/SmallBank.json \
-	build/contracts/Sorter.json
+	build/contracts/Sorter.json \
+	build/contracts/ETH.json
 
 
 build: $(TARGET)

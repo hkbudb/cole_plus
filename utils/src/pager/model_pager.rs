@@ -742,10 +742,59 @@ mod tests {
     }
 
     #[test]
+    fn test_skip_model() {
+        let mut rng = StdRng::seed_from_u64(1);
+        let n = 10000;
+
+        let mut keys = Vec::<CompoundKey>::new();
+        for i in 0..n {
+            let acc_addr = H160::random_using(&mut rng);
+            let state_addr = H256::random_using(&mut rng);
+            let version = i as u32;
+            let addr_key = AddrKey::new(acc_addr.into(), state_addr.into());
+            let key = CompoundKey::new(addr_key, version);
+            keys.push(key);
+        }
+        keys.sort();
+        let start = std::time::Instant::now();
+        let mut stream_model_constructor = ModelConstructor::new("model.dat");
+        let mut point_vec = Vec::<(CompoundKey, usize)>::new();
+        let skip = 46;
+        for (i, key) in keys.iter().enumerate() {
+            if i % skip == 0 {
+                stream_model_constructor.append_state_key(key);
+                point_vec.push((*key, i));
+            }
+        }
+        stream_model_constructor.finalize_append();
+        let elapse = start.elapsed().as_nanos();
+        println!("avg construct time: {}", elapse / n as u128);
+
+        let mut reader = ModelPageReader::load("model.dat");
+        let run_id = 0;
+        let mut cache_manager = CacheManager::new();
+        println!("check points");
+        let mut time_accum = 0;
+        let point_vec_len = point_vec.len();
+        for point in point_vec {
+            let (key, true_pos) = (point.0, point.1);
+            let start = std::time::Instant::now();
+            let pred_pos = reader.get_pred_state_page_id(run_id, &key, false, &mut cache_manager);
+            let elapse = start.elapsed().as_nanos();
+            time_accum += elapse;
+            if (true_pos as f64 - (pred_pos * skip) as f64).abs() > 2.0 * (skip as f64) {
+                println!("true_pos: {}, pred_pos: {}, diff: {}", true_pos, (pred_pos * skip), (true_pos as f64 - (pred_pos * skip) as f64).abs());
+                reader.get_pred_state_page_id(run_id, &key, true, &mut cache_manager);
+            }
+        }
+        println!("avg pred time: {}", time_accum / point_vec_len as u128);
+    }
+    
+    #[test]
     fn test_old_design_streaming_model() {
         let mut rng = StdRng::seed_from_u64(1);
         let epsilon = 23;
-        let n = 1000000;
+        let n = 10000;
         
         let mut keys = Vec::<CompoundKey>::new();
         for i in 0..n {
@@ -776,18 +825,21 @@ mod tests {
             println!("collection size: {:?}, model_level: {:?}", collection.v.len(), collection.model_level);
         }
 
-        let start = std::time::Instant::now();
+        
+        let mut time_accum = 0;
         for point in point_vec {
             let key = point.0;
             let true_pos = point.1;
+            let start = std::time::Instant::now();
             let pred_pos = reader.get_pred_state_pos(0, &key, epsilon, &mut cache_manager);
+            let elapse = start.elapsed().as_nanos();
+            time_accum += elapse;
             if (true_pos as f64 - pred_pos as f64).abs() > (epsilon + 1) as f64 {
                 println!("true_pos: {}, pred_pos: {}, diff: {}", true_pos, pred_pos, (true_pos as f64 - pred_pos as f64).abs());
             }
             // println!("true: {}, pred: {}, diff: {}", true_pos, pred_pos, (true_pos as f64 - pred_pos as f64).abs());
             // assert!((true_pos as f64 - pred_pos as f64).abs().floor() <= (epsilon + 1) as f64);
         }
-        let elapse = start.elapsed().as_nanos();
-        println!("avg pred time: {}", elapse / n as u128);
+        println!("avg pred time: {}", time_accum / n as u128);
     }
 }

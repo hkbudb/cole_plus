@@ -111,6 +111,7 @@ impl<'a> Cole<'a> {
         // compute the in-memory threshold
         let in_mem_thres = self.configs.base_state_num;
         if self.mem_mht.key_num as usize == in_mem_thres {
+            let start = std::time::Instant::now();
             // the in-memory mb-tree is full, the data should be merged to the run in the disk-level
             let key_values = self.mem_mht.load_all_key_values();
             // clear the in-mem
@@ -128,6 +129,8 @@ impl<'a> Cole<'a> {
                 }
             };
             let run = LevelRun::construct_run_by_in_memory_merge(inputs, run_id, level_id, &self.configs.dir_name, self.configs.epsilon, self.configs.fanout, self.configs.max_num_of_states_in_a_run(level_id), level_num_of_run, self.configs.size_ratio);
+            let elapse = start.elapsed().as_nanos();
+            println!("flush time: {:?}", elapse);
             match self.levels.get_mut(level_id as usize) {
                 Some(level_ref) => {
                     level_ref.run_vec.push(run); // push the new run to the end for efficiency, but query runs in the revert sort

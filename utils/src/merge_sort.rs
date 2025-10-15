@@ -215,7 +215,7 @@ pub fn in_memory_collect(state_vec: Vec<(CompoundKey, StateValue)>, output_state
     let max_state = (AddrKey::new(Address(H160::from_slice(&vec![255u8;20])), StateKey(H256::from_slice(&vec![255u8;32]))), u32::MAX, StateValue(H256::from_low_u64_be(0)));
 
     state_writer.append(min_state);
-
+    // let mut model_timer = 0;
     // collect each addr and their (ver, state_value), then build CDC-Tree and upper MHT
     let mut prev_addr_key = AddrKey::default();
     let mut prev_ver_objs = Vec::<VerObject>::new();
@@ -233,7 +233,10 @@ pub fn in_memory_collect(state_vec: Vec<(CompoundKey, StateValue)>, output_state
                     let latest_ver_obj = prev_ver_objs.last().unwrap().clone();
                     let model_key = state_writer.append((prev_addr_key, latest_ver_obj.ver, latest_ver_obj.value));
                     if let Some(inner_model_key) = model_key {
+                        // let start = std::time::Instant::now();
                         model_constructor.append_state_key(&inner_model_key);
+                        // let elapse = start.elapsed().as_nanos();
+                        // model_timer += elapse;
                     }
                     // insert the state's addr to the bloom filter
                     if let Some(inner_filter) = &mut filter {
@@ -263,7 +266,10 @@ pub fn in_memory_collect(state_vec: Vec<(CompoundKey, StateValue)>, output_state
         let latest_ver_obj = prev_ver_objs.last().unwrap().clone();
         let model_key = state_writer.append((prev_addr_key, latest_ver_obj.ver, latest_ver_obj.value));
         if let Some(inner_model_key) = model_key {
+            // let start = std::time::Instant::now();
             model_constructor.append_state_key(&inner_model_key);
+            // let elapse = start.elapsed().as_nanos();
+            // model_timer += elapse;
         }
         // insert the state's addr to the bloom filter
         if let Some(inner_filter) = &mut filter {
@@ -286,7 +292,11 @@ pub fn in_memory_collect(state_vec: Vec<(CompoundKey, StateValue)>, output_state
     // flush the state writer
     state_writer.flush();
     // flush the model writer
+    // let start = std::time::Instant::now();
     model_constructor.finalize_append();
+    // let elapse = start.elapsed().as_nanos();
+    // model_timer += elapse;
+    // println!("model timer: {}", model_timer);
     (state_writer.to_state_reader(), model_constructor.output_model_writer.to_model_reader(), upper_mht_writer.to_upper_mht_reader(), cdc_tree_writer.to_cdc_tree_reader(), filter)
 }
 

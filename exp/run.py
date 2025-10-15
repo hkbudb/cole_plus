@@ -11,18 +11,25 @@ mht_fanout_default = 4
 capacity_default = 1
 
 def latency_json_gen(workload, distribution, contract_name, index_name, mem_size, scale, num_of_contract, tx_in_block, size_ratio, epsilon, mht_fanout):
-    ycsb_path = "./%s/%s-%s-data.txt" % (workload, workload, distribution)
-    ycsb_base_row_number = 20000
     db_path = "./%s/default_db" % workload
     if contract_name == "kvstore":
         result_path = "./%s/%s-%s" % (workload, workload, distribution)
+        ycsb_path = "./%s/%s-%s-data.txt" % (workload, workload, distribution)
+        ycsb_base_row_number = 20000
+        params_dict = { "index_name": index_name, "contract_name": contract_name, "scale": scale, "ycsb_path": ycsb_path, "ycsb_base_row_number": ycsb_base_row_number, "num_of_contract": num_of_contract, "tx_in_block": tx_in_block, "db_path": db_path, "mem_size": mem_size, "size_ratio": size_ratio, "epsilon": epsilon, "mht_fanout": mht_fanout, "result_path":result_path}
     elif contract_name == "smallbank":
         result_path = "./%s/%s" % (workload, workload)
-    params_dict = { "index_name": index_name, "contract_name": contract_name, "scale": scale, "ycsb_path": ycsb_path, "ycsb_base_row_number": ycsb_base_row_number, "num_of_contract": num_of_contract, "tx_in_block": tx_in_block, "db_path": db_path, "mem_size": mem_size, "size_ratio": size_ratio, "epsilon": epsilon, "mht_fanout": mht_fanout, "result_path":result_path}
+        params_dict = { "index_name": index_name, "contract_name": contract_name, "scale": scale, "num_of_contract": num_of_contract, "tx_in_block": tx_in_block, "db_path": db_path, "mem_size": mem_size, "size_ratio": size_ratio, "epsilon": epsilon, "mht_fanout": mht_fanout, "result_path":result_path}
+    elif contract_name == "eth":
+        result_path = "./%s/%s" % (workload, workload)
+        eth_path = "./%s/%s-TX.csv" % (workload, workload)
+        params_dict = { "index_name": index_name, "contract_name": contract_name, "scale": scale, "eth_path": eth_path, "num_of_contract": num_of_contract, "tx_in_block": tx_in_block, "db_path": db_path, "mem_size": mem_size, "size_ratio": size_ratio, "epsilon": epsilon, "mht_fanout": mht_fanout, "result_path":result_path}
+
+    
     params_json = json.dumps(params_dict)
     if contract_name == "kvstore":
         params_file_path = "./%s/params-%s-%s-%s-%sk-fan%s-ratio%s-mem%s.json" % (workload, workload, distribution, index_name, scale//1000, mht_fanout, size_ratio, mem_size)
-    elif contract_name == "smallbank":
+    elif contract_name == "smallbank" or contract_name == "eth":
         params_file_path = "./%s/params-%s-%s-%sk-fan%s-ratio%s-mem%s.json" % (workload, contract_name, index_name, scale//1000, mht_fanout, size_ratio, mem_size)
     with open(params_file_path, "w") as f:
         f.write(params_json)
@@ -130,9 +137,29 @@ def test_overall_kvstore(distribution, workloads):
     # workloads = ["writeonly", "readwriteeven", "readonly"]
     # workloads = ["writeonly"]
     # indexes = ["mpt_archive", "mpt_prune", "cole_star", "cole_plus_async_archive", "cole_plus_async_prune"]
-    indexes = ["cole_star", "cole_plus_async_archive", "cole_plus_async_prune"]
-    # indexes = ["letus"]
+    # indexes = ["cole_star", "cole_plus_async_archive", "cole_plus_async_prune"]
+    indexes = ["cole_ablation_layout"]
     scale = [60000000]
+    for cur_workload in workloads:
+        if not os.path.exists(cur_workload):
+            os.mkdir(cur_workload)
+        for cur_scale in scale:
+            for cur_index in indexes:
+                if cur_index == "cole_plus_async_archive" or cur_index == "cole_plus_async_prune" or cur_index == "cole_star" or cur_index == "cole_plus_ablation_siri" or cur_index == "cole_ablation_layout":
+                    mem_size = 10000
+                else:
+                    mem_size = 32
+                print("%s %s %s %s" % (cur_workload, distribution, cur_index, cur_scale))
+                params_file_path = latency_json_gen(workload=cur_workload, distribution=distribution, contract_name="kvstore", index_name=cur_index, mem_size=mem_size, scale=cur_scale, num_of_contract=1, tx_in_block=default_tx_in_block, size_ratio=size_ratio_default, epsilon=23, mht_fanout=mht_fanout_default)
+                os.system("cargo run --release --bin latency %s" % (params_file_path))
+                # compute storage
+                # write_storage_json(cur_workload, distribution, cur_index, mem_size, cur_scale, mht_fanout_default, size_ratio_default)
+                os.system("rm -rf ./%s/default_db" % cur_workload)
+
+def test_eth():
+    workloads = ["eth"]
+    indexes = ["mpt_archive"]
+    scale = [1000]
     for cur_workload in workloads:
         if not os.path.exists(cur_workload):
             os.mkdir(cur_workload)
@@ -142,11 +169,9 @@ def test_overall_kvstore(distribution, workloads):
                     mem_size = 10000
                 else:
                     mem_size = 32
-                print("%s %s %s %s" % (cur_workload, distribution, cur_index, cur_scale))
-                params_file_path = latency_json_gen(workload=cur_workload, distribution=distribution, contract_name="kvstore", index_name=cur_index, mem_size=mem_size, scale=cur_scale, num_of_contract=1, tx_in_block=default_tx_in_block, size_ratio=size_ratio_default, epsilon=23, mht_fanout=mht_fanout_default)
+                print("%s %s %s" % (cur_workload, cur_index, cur_scale))
+                params_file_path = latency_json_gen(workload=cur_workload, distribution="", contract_name="eth", index_name=cur_index, mem_size=mem_size, scale=cur_scale, num_of_contract=1, tx_in_block=default_tx_in_block, size_ratio=size_ratio_default, epsilon=23, mht_fanout=mht_fanout_default)
                 os.system("cargo run --release --bin latency %s" % (params_file_path))
-                # compute storage
-                # write_storage_json(cur_workload, distribution, cur_index, mem_size, cur_scale, mht_fanout_default, size_ratio_default)
                 os.system("rm -rf ./%s/default_db" % cur_workload)
 
 """ def test_overall_smallbank():
@@ -267,11 +292,31 @@ def test_size_ratio(distribution):
             write_storage_json(cur_workload, distribution, cur_index, mem_size, cur_scale, mht_fanout_default, size_ratio_default)
             os.system("rm -rf ./%s/default_db" % cur_workload) """
 
+def test_merge_time(distribution, workloads):
+    indexes = ["cole_plus_archive"]
+    scale = [1200000]
+    for cur_workload in workloads:
+        if not os.path.exists(cur_workload):
+            os.mkdir(cur_workload)
+        for cur_scale in scale:
+            for cur_index in indexes:
+                mem_size = 10000
+                print("%s %s %s %s" % (cur_workload, distribution, cur_index, cur_scale))
+                params_file_path = latency_json_gen(workload=cur_workload, distribution=distribution, contract_name="kvstore", index_name=cur_index, mem_size=mem_size, scale=cur_scale, num_of_contract=1, tx_in_block=default_tx_in_block, size_ratio=size_ratio_default, epsilon=23, mht_fanout=mht_fanout_default)
+                os.system("cargo run --release --bin latency %s" % (params_file_path))
+                # compute storage
+                # write_storage_json(cur_workload, distribution, cur_index, mem_size, cur_scale, mht_fanout_default, size_ratio_default)
+                os.system("rm -rf ./%s/default_db" % cur_workload)
+
+
 if __name__ == "__main__":
     # test_mht_fanout("uniform")
     # test_size_ratio("uniform")
     # test_prov("uniform")
     # test_overall_kvstore("uniform", ["writeonly", "readwriteeven", "readonly"])
     # test_overall_kvstore("zipfian", ["readwriteeven", "readonly"])
-    test_overall_kvstore("uniform", ["writeonly"])
+    # test_overall_kvstore("uniform", ["writeonly"])
+    # test_merge_time("uniform", ["writeonly"])
+    # test_eth()
+    test_overall_kvstore("uniform", ["readwriteeven"])
     pass

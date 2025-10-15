@@ -144,6 +144,7 @@ pub fn in_memory_merge_old_design(mut inputs: Vec<InMemStateIteratorOld>, output
     }
     // flag of number of full iterators
     let mut full_cnt = 0;
+    // let mut model_timer = 0;
     while full_cnt < k {
         // pop the smallest state from the heap
         let elem = minheap.pop().unwrap();
@@ -151,7 +152,10 @@ pub fn in_memory_merge_old_design(mut inputs: Vec<InMemStateIteratorOld>, output
         // avoid duplication of adding the min and max state
         if state != min_state && state != max_state {
             // add the state's key to the model constructor
+            // let start = std::time::Instant::now();
             model_constructor.append_state_key(&state.0);
+            // let elapse = start.elapsed().as_nanos();
+            // model_timer += elapse;
             // insert the state's key to the bloom filter
             if filter.is_some() {
                 let addr_key = state.0.addr;
@@ -196,7 +200,11 @@ pub fn in_memory_merge_old_design(mut inputs: Vec<InMemStateIteratorOld>, output
     // flush the state writer
     state_writer.flush();
     // finalize the model constructor
+    // let start = std::time::Instant::now();
     model_constructor.finalize_append();
+    // let elapse = start.elapsed().as_nanos();
+    // model_timer += elapse;
+    // println!("model timer: {}", model_timer);
     mht_constructor.build_mht();
     return (state_writer, model_constructor.output_model_writer, mht_constructor.output_mht_writer, filter);
 }

@@ -25,3 +25,4 @@ primitive-types = { version = "0.10.1", features = ["serde"] }
 rand = "0.8.4"
 pattern-oridented-split-tree = { version = "0.1.0", path = "../pattern-oridented-split-tree" }
 merkle-btree-storage = { version = "0.1.0", path = "../merkle-btree-storage" }
+siri-tree = { version = "0.1.0", path = "../siri-tree" }

@@ -11,6 +11,7 @@ use run::{reconstruct_run_proof, LevelRun, RunFilterSize, RunProof};
 use utils::{cacher::CacheManager, config::Configs, pager::{cdc_mht::{CDCTreeReader, VerObject}, state_pager::StateIterator, upper_mht::UpperMHTReader}, types::{compute_concatenate_hash, AddrKey, CompoundKey, StateValue}, MemCost, OpenOptions, Read, Write};
 use serde::{Serialize, Deserialize};
 use utils::DEFAULT_MAX_NODE_CAPACITY;
+
 pub struct InMemGroup {
     pub mem_mht: InMemoryPOSTree, // in-mem POS-tree
 }
@@ -202,6 +203,7 @@ impl<'a> ColePlus<'a> {
             // get the merge group index
             let merge_index = self.get_merge_in_mem_group_index();
             if self.in_mem_group[merge_index].mem_mht.key_num as usize == in_mem_thres {
+                let start = std::time::Instant::now();
                 // merge group is full, the data should be merged to the run in the disk-level
                 let state_vec = self.in_mem_group[merge_index].mem_mht.load_all_key_values();
                 self.in_mem_group[merge_index].clear();
@@ -216,7 +218,10 @@ impl<'a> ColePlus<'a> {
                         0
                     }
                 };
+                
                 let run = LevelRun::construct_run_by_in_memory_collection(state_vec, run_id, level_id, &self.configs.dir_name, self.configs.fanout, self.configs.max_num_of_states_in_a_run(level_id), level_num_of_run, self.configs.size_ratio, self.configs.is_pruned);
+                let elapse = start.elapsed().as_nanos();
+                println!("flush time: {:?}", elapse);
                 match self.levels.get_mut(level_id as usize) {
                     Some(level_ref) => {
                         level_ref.run_vec.push(run); // push the new run to the end for efficiency, but query runs in the revert sort
@@ -230,7 +235,10 @@ impl<'a> ColePlus<'a> {
             }
             self.switch_in_mem_group();
             // iteratively merge the levels if the level reaches the capacity
+            let start = std::time::Instant::now();
             self.check_and_merge();
+            let elapse = start.elapsed().as_nanos();
+            println!("merge time: {:?}", elapse);
         }
     }
 

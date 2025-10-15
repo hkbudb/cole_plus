@@ -24,6 +24,8 @@ cole-plus = { version = "0.1.0", path = "../cole-plus" }
 cole-index = { version = "0.1.0", path = "../cole-index" }
 cole-plus-async = { version = "0.1.0", path = "../cole-plus-async" }
 cole-star = { version = "0.1.0", path = "../cole-star" }
+cole-plus-ablation-siri = { version = "0.1.0", path = "../cole-plus-ablation-siri" }
+cole-ablation-layout = { version = "0.1.0", path = "../cole-ablation-layout" }
 patricia-trie = { version = "0.1.0", path = "../patricia-trie" }
 rocksdb = "0.22.0"
 letus_new = { version = "0.1.0", path = "../letus_new" }

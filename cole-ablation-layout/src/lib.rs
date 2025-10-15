@@ -1,12 +1,13 @@
+pub mod run;
 pub mod async_level;
 use async_level::AsyncLevel;
-use cole_index::{in_memory_mbtree::InMemoryMBTree, run::{LevelRun, reconstruct_run_proof, RunFilterSize}, RunProofOrHash};
-use merkle_btree_storage::{traits::BPlusTreeNodeIO, RangeProof as MBTreeRangeProof};
+use cole_index::in_memory_mbtree::InMemoryMBTree;
+use run::{LevelRun, RunFilterSize};
+use merkle_btree_storage::traits::BPlusTreeNodeIO;
 use std::thread::JoinHandle;
 use utils::{cacher::CacheManagerOld, config::Configs, pager::old_state_pager::{InMemStateIteratorOld, StateIteratorOld, StatePageReaderOld}, types::{compute_concatenate_hash, AddrKey, CompoundKey, StateValue}, MemCost, OpenOptions, Read, Write};
 use primitive_types::H256;
 use std::fmt::{Debug, Formatter, Error};
-use serde::{Serialize, Deserialize};
 pub const EVAL_STORAGE_AFTER_DROP: bool = true;
 pub struct InMemGroup {
     pub mem_mht: InMemoryMBTree, // in-mem MB-tree
@@ -34,13 +35,13 @@ impl InMemGroup {
     }
 }
 
-/* COLEStar consists of:
+/* COLE-Ablation-Layout consists of:
     (i) a reference of configs that include params
     (ii) two InMemGroups
     (iii) a write_group_flag to determine whether the first group of mem_mht is the writing group or the second is
     (iv) a vector of levels that stores each level's LevelRuns
  */
-pub struct ColeStar<'a> {
+pub struct ColeAblationLayout<'a> {
     pub configs: &'a Configs,
     pub in_mem_group: [InMemGroup; 2],
     pub in_mem_write_group_flag: bool,
@@ -49,7 +50,7 @@ pub struct ColeStar<'a> {
     pub cache_manager: CacheManagerOld,
 }
 
-impl<'a> ColeStar<'a> {
+impl<'a> ColeAblationLayout<'a> {
     // create a new index using configs,
     pub fn new(configs: &'a Configs) -> Self {
         Self {
@@ -61,7 +62,7 @@ impl<'a> ColeStar<'a> {
             cache_manager: CacheManagerOld::new(),
         }
     }
-    
+
     fn get_meta(&mut self) -> usize {
         let path = self.get_tree_meta_path();
         let mut file = OpenOptions::new().create(true).read(true).write(true).open(&path).unwrap();
@@ -252,7 +253,7 @@ impl<'a> ColeStar<'a> {
             }
         }
     }
-    
+
     pub fn search_latest_state_value(&mut self, addr_key: AddrKey) -> Option<StateValue> {
         // compute the boundary compound key
         let upper_key = CompoundKey {
@@ -308,92 +309,7 @@ impl<'a> ColeStar<'a> {
         return None;
     }
 
-    // generate the range proof given the addr_key and two version ranges
-    pub fn search_with_proof(&mut self, addr_key: AddrKey, low_version: u32, upper_version: u32) -> ColeStarProof {
-        let mut proof = ColeStarProof::new();
-        // generate the two compound keys
-        let low_key = CompoundKey::new(addr_key, low_version);
-        let upper_key = CompoundKey::new(addr_key, upper_version);
-        let mut rest_is_hash = false;
-        // search the write group of the in-memory tree
-        let write_index = self.get_write_in_mem_group_index();
-        let (r, p) = merkle_btree_storage::get_range_proof(&mut self.in_mem_group[write_index].mem_mht, low_key, upper_key);
-        if r.is_some() {
-            // check if the left_most version is smaller than the low_version, it means all the digests of the rest of the runs should be added to the proof
-            // there is no need to prove_range the run
-            let left_most_result = r.as_ref().unwrap()[0].0;
-            let result_version = left_most_result.version;
-            if result_version < low_version {
-                rest_is_hash = true;
-            }
-        }
-        proof.in_mem_level.set_write_group(r, p);
-        // search the merge group of the in-memory tree
-        let merge_index = self.get_merge_in_mem_group_index();
-        let (r, p) = merkle_btree_storage::get_range_proof(&mut self.in_mem_group[merge_index].mem_mht, low_key, upper_key);
-        if r.is_some() {
-            // check if the left_most version is smaller than the low_version, it means all the digests of the rest of the runs should be added to the proof
-            // there is no need to prove_range the run
-            let left_most_result = r.as_ref().unwrap()[0].0;
-            let result_version = left_most_result.version;
-            if result_version < low_version {
-                rest_is_hash = true;
-            }
-        }
-        proof.in_mem_level.set_merge_group(r, p);
-
-        let mut disk_level_vec = Vec::new();
-        // search the runs in all disk levels
-        
-        for level in &mut self.levels {
-            let mut level_proof = ColeStarLevelProof::new();
-            // write group
-            let write_index = level.get_write_group_index();
-            for run in level.run_groups[write_index].run_vec.iter_mut().rev() {
-                // decide to add the run's proof or the run's digest
-                if rest_is_hash == false {
-                    let (r, p) = run.prove_range(addr_key, low_version, upper_version, &self.configs, &mut self.cache_manager);
-                    if r.is_some() {
-                        // check if the left_most version is smaller than the low_version, it means all the digests of the rest of the runs should be added to the proof
-                        // there is no need to prove_range the run
-                        let left_most_result = r.as_ref().unwrap()[1];
-                        let result_version = left_most_result.0.version;
-                        if result_version < low_version {
-                            rest_is_hash = true;
-                        }
-                    }
-                    level_proof.push_to_write_group(r, RunProofOrHash::Proof(p));
-                } else {
-                    level_proof.push_to_write_group(None, RunProofOrHash::Hash(run.digest));
-                }
-            }
-            // merge group
-            let merge_index = level.get_merge_group_index();
-            for run in level.run_groups[merge_index].run_vec.iter_mut().rev() {
-                // decide to add the run's proof or the run's digest
-                if rest_is_hash == false {
-                    let (r, p) = run.prove_range(addr_key, low_version, upper_version, &self.configs, &mut self.cache_manager);
-                    if r.is_some() {
-                        // check if the left_most version is smaller than the low_version, it means all the digests of the rest of the runs should be added to the proof
-                        // there is no need to prove_range the run
-                        let left_most_result = r.as_ref().unwrap()[1];
-                        let result_version = left_most_result.0.version;
-                        if result_version < low_version {
-                            rest_is_hash = true;
-                        }
-                    }
-                    level_proof.push_to_merge_group(r, RunProofOrHash::Proof(p));
-                } else {
-                    level_proof.push_to_merge_group(None, RunProofOrHash::Hash(run.digest));
-                }
-            }
-            // add the level_proof to disk_level_vec
-            disk_level_vec.push(level_proof);
-        }
-        // add the disk level's proofs to the proof
-        proof.disk_level = disk_level_vec;
-        return proof;
-    }
+    /* Omit the search with proof for the ablation study */
 
     fn switch_in_mem_group(&mut self) {
         // reverse the flag of write group
@@ -508,128 +424,7 @@ impl<'a> ColeStar<'a> {
     }
 }
 
-pub fn verify_and_collect_result(addr_key: AddrKey, low_version: u32, upper_version: u32, root_hash: H256, proof: &ColeStarProof, fanout: usize) -> (bool, Option<Vec<(CompoundKey, StateValue)>>) {
-    let mut level_roots = Vec::<H256>::new();
-    // first reconstruct the write group of the in-mem tree
-    let low_key = CompoundKey::new(addr_key, low_version);
-    let upper_key = CompoundKey::new(addr_key, upper_version);
-    // retrieve write group result and proof
-    let write_group_result = &proof.in_mem_level.write_group.0;
-    let write_group_proof = &proof.in_mem_level.write_group.1;
-    let h = merkle_btree_storage::reconstruct_range_proof(low_key, upper_key, write_group_result, write_group_proof);
-    level_roots.push(h);
-    let mut merge_result: Vec<(CompoundKey, StateValue)> = vec![];
-    let mut rest_is_hash = false;
-    if write_group_result.is_some() {
-        let left_most_result = write_group_result.as_ref().unwrap()[0].0;
-        let result_version = left_most_result.version;
-        if result_version < low_version {
-            rest_is_hash = true;
-        }
-        let r: Vec<(CompoundKey, StateValue)> = write_group_result.as_ref().unwrap().iter().map(|(k, v)| {
-            (*k, *v)
-        }).collect();
-        merge_result.extend(r);
-    }
-    // then reconstruct merge group of the in-mem tree
-    // retrieve merge group result and proof
-    let merge_group_result = &proof.in_mem_level.merge_group.0;
-    let merge_group_proof = &proof.in_mem_level.merge_group.1;
-    let h = merkle_btree_storage::reconstruct_range_proof(low_key, upper_key, merge_group_result, merge_group_proof);
-    level_roots.push(h);
-    if merge_group_result.is_some() {
-        let left_most_result = merge_group_result.as_ref().unwrap()[0].0;
-        let result_version = left_most_result.version;
-        if result_version < low_version {
-            rest_is_hash = true;
-        }
-        let r: Vec<(CompoundKey, StateValue)> = merge_group_result.as_ref().unwrap().iter().map(|(k, v)| {
-            (*k, *v)
-        }).collect();
-        merge_result.extend(r);
-    }
-
-    for level in &proof.disk_level {
-        let mut level_write_h_vec: Vec<H256> = Vec::new();
-        let mut level_merge_h_vec: Vec<H256> = Vec::new();
-        let write_runs = &level.write_group;
-        let merge_runs = &level.merge_group;
-        for run in write_runs {
-            let r = &run.0;
-            let p = &run.1;
-            match p {
-                RunProofOrHash::Hash(h) => {
-                    if rest_is_hash == false {
-                        // in-complete result, return false
-                        return (false, None);
-                    }
-                    level_write_h_vec.push(*h);
-                },
-                RunProofOrHash::Proof(proof) => {
-                    if rest_is_hash == true {
-                        // in-complete result, return false
-                        return (false, None);
-                    }
-                    let (_, h) = reconstruct_run_proof(addr_key, low_version, upper_version, r, proof, fanout);
-                    level_write_h_vec.push(h);
-                }
-            }
-            if r.is_some() {
-                let left_most_result = r.as_ref().unwrap()[1];
-                let result_version = left_most_result.0.version;
-                if result_version < low_version {
-                    rest_is_hash = true;
-                }
-                merge_result.extend(r.as_ref().unwrap());
-            }
-        }
-
-        for run in merge_runs {
-            let r = &run.0;
-            let p = &run.1;
-            match p {
-                RunProofOrHash::Hash(h) => {
-                    if rest_is_hash == false {
-                        // in-complete result, return false
-                        return (false, None);
-                    }
-                    level_merge_h_vec.push(*h);
-                },
-                RunProofOrHash::Proof(proof) => {
-                    if rest_is_hash == true {
-                        // in-complete result, return false
-                        return (false, None);
-                    }
-                    let (_, h) = reconstruct_run_proof(addr_key, low_version, upper_version, r, proof, fanout);
-                    level_merge_h_vec.push(h);
-                }
-            }
-            if r.is_some() {
-                let left_most_result = r.as_ref().unwrap()[1];
-                let result_version = left_most_result.0.version;
-                if result_version < low_version {
-                    rest_is_hash = true;
-                }
-                merge_result.extend(r.as_ref().unwrap());
-            }
-        }
-        let mut total_run_hash_vec = vec![];
-        total_run_hash_vec.extend(level_write_h_vec);
-        total_run_hash_vec.extend(level_merge_h_vec);
-        let level_h = compute_concatenate_hash(&total_run_hash_vec);
-        level_roots.push(level_h);
-    }
-
-    let reconstruct_root = compute_concatenate_hash(&level_roots);
-    if reconstruct_root != root_hash {
-        return (false, None);
-    }
-    merge_result.sort_by(|a, b| a.0.partial_cmp(&b.0).unwrap());
-    merge_result = merge_result.into_iter().filter(|r| r.0 >= low_key && r.0 <= upper_key).collect();
-    return (true, Some(merge_result));
-}
-
-impl<'a> Drop for ColeStar<'a> {
+impl<'a> Drop for ColeAblationLayout<'a> {
     fn drop(&mut self) {
         if EVAL_STORAGE_AFTER_DROP == false {
             // first handle the in mem level's merge thread
@@ -668,210 +463,5 @@ impl<'a> Drop for ColeStar<'a> {
         }
         // lastly persist the manifest
         self.update_manifest();
-    }
-}
-
-impl<'a> Debug for ColeStar<'a> {
-    fn fmt(&self, f: &mut Formatter<'_>) -> Result<(), Error> {
-        let write_index = self.get_write_in_mem_group_index();
-        let merge_index = self.get_merge_in_mem_group_index();
-        write!(f, "flag: {}, write_index: {}, merge_index: {}\n", self.in_mem_write_group_flag, write_index, merge_index).unwrap();
-        write!(f, "write mem: {:?}\n", self.in_mem_group[write_index].mem_mht.get_key_num()).unwrap();
-        write!(f, "merge mem: {:?}\n", self.in_mem_group[merge_index].mem_mht.get_key_num()).unwrap();
-        write!(f, "run_id_cnt: {}\n", self.run_id_cnt).unwrap();
-        for (i, level) in self.levels.iter().enumerate() {
-            write!(f, "level {}: {:?}\n", i, level).unwrap();
-        }
-        Ok(())
-    }
-}
-
-#[derive(Debug, Serialize, Deserialize, Clone)]
-pub struct ColeStarProof {
-    pub in_mem_level: ColeStarInMemProof,
-    pub disk_level: Vec<ColeStarLevelProof>,
-}
-
-impl ColeStarProof {
-    // initiate the cole-start's proof
-    pub fn new() -> Self {
-        Self {
-            in_mem_level: ColeStarInMemProof::new(),
-            disk_level: Vec::new(),
-        }
-    }
-}
-
-#[derive(Debug, Serialize, Deserialize, Clone)]
-pub struct ColeStarInMemProof {
-    pub write_group: (Option<Vec<(CompoundKey, StateValue)>>, MBTreeRangeProof<CompoundKey, StateValue>),
-    pub merge_group: (Option<Vec<(CompoundKey, StateValue)>>, MBTreeRangeProof<CompoundKey, StateValue>),
-}
-
-impl ColeStarInMemProof {
-    pub fn new() -> Self {
-        Self {
-            write_group: (None, MBTreeRangeProof::default()),
-            merge_group: (None, MBTreeRangeProof::default()),
-        }
-    }
-
-    pub fn set_write_group(&mut self, r: Option<Vec<(CompoundKey, StateValue)>>, p: MBTreeRangeProof<CompoundKey, StateValue>) {
-        self.write_group = (r, p);
-    }
-
-    pub fn set_merge_group(&mut self, r: Option<Vec<(CompoundKey, StateValue)>>, p: MBTreeRangeProof<CompoundKey, StateValue>) {
-        self.merge_group = (r, p);
-    }
-}
-
-#[derive(Debug, Serialize, Deserialize, Clone)]
-pub struct ColeStarLevelProof {
-    pub write_group: Vec<(Option<Vec<(CompoundKey, StateValue)>>, RunProofOrHash)>,
-    pub merge_group: Vec<(Option<Vec<(CompoundKey, StateValue)>>, RunProofOrHash)>,
-}
-
-impl ColeStarLevelProof {
-    pub fn new() -> Self {
-        Self {
-            write_group: Vec::new(),
-            merge_group: Vec::new(),
-        }
-    }
-
-    pub fn push_to_write_group(&mut self, r: Option<Vec<(CompoundKey, StateValue)>>, p: RunProofOrHash) {
-        self.write_group.push((r, p));
-    }
-
-    pub fn push_to_merge_group(&mut self, r: Option<Vec<(CompoundKey, StateValue)>>, p: RunProofOrHash) {
-        self.merge_group.push((r, p));
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-    use primitive_types::H160;
-    use rand::{rngs::StdRng, SeedableRng};
-    use utils::types::{AddrKey, CompoundKey};
-    #[test]
-    fn test_insert_and_query_cole_star() {
-        let num_of_contract = 1;
-        let num_of_addr = 100000;
-        let num_of_version = 200;
-        let n = num_of_contract * num_of_addr * num_of_version;
-        let mut rng = StdRng::seed_from_u64(1);
-
-        let fanout = 4;
-        let epsilon = 23;
-        let dir_name = "cole_storage";
-        if std::path::Path::new(dir_name).exists() {
-            std::fs::remove_dir_all(dir_name).unwrap_or_default();
-        }
-        std::fs::create_dir(dir_name).unwrap_or_default();
-        let base_state_num = 50000;
-        let size_ratio = 10;
-        let configs = Configs::new(fanout, epsilon, dir_name.to_string(), base_state_num, size_ratio, false);
-
-        let mut state_vec = Vec::<(CompoundKey, StateValue)>::new();
-        let mut addr_key_vec = Vec::<AddrKey>::new();
-        for _ in 1..=num_of_contract {
-            for _ in 1..=num_of_addr {
-                let acc_addr = H160::random_using(&mut rng);
-                let state_addr = H256::random_using(&mut rng);
-                let addr_key = AddrKey::new(acc_addr.into(), state_addr.into());
-                addr_key_vec.push(addr_key);
-            }
-        }
-        // let multi_factor = 2;
-        for k in 1..=num_of_version {
-            for addr_key in &addr_key_vec {
-                let compound_key = CompoundKey::new(*addr_key, k * 2);
-                state_vec.push((compound_key, H256::from_low_u64_be((k * 2) as u64).into()));
-            }
-        }
-/*         for addr_key in &addr_key_vec {
-            for k in 1..=num_of_version {
-                let compound_key = CompoundKey::new_with_addr_key(*addr_key, k * 2);
-                state_vec.push(CompoundKeyValue::new_with_compound_key(compound_key, H256::from_low_u64_be((k * 2) as u64).into()));
-            }
-        } */
-
-        let mut cole_star = ColeStar::new(&configs);
-        let start = std::time::Instant::now();
-        for state in &state_vec {
-            cole_star.insert(*state);
-        }
-        let elapse = start.elapsed().as_nanos();
-        println!("average insert: {:?}", elapse / n as u128);
-        // println!("cole star: {:?}", cole_star);
-
-        println!("drop");
-        drop(cole_star);
-        // let mut cole_star = ColeStar::load(&configs);
-
-        /* let start = std::time::Instant::now();
-        for addr in &addr_key_vec {
-            let r = cole_star.search_latest_state_value(*addr);
-            let true_value = StateValue(H256::from_low_u64_be((num_of_version* 2) as u64));
-            
-            if r.unwrap() != true_value {
-                println!("false addr: {:?}", addr);
-                println!("r: {:?}, true value: {:?}", r, true_value);
-                break;
-            }
-        }
-        let elapse = start.elapsed().as_nanos();
-        println!("average point query: {:?}", elapse / n as u128);
-        let root = cole_star.compute_digest();
-        let mut search_prove = 0;
-        for addr in &addr_key_vec {
-            let start = std::time::Instant::now();
-            let proof = cole_star.search_with_proof(*addr, 0, num_of_version * 2);
-            let (b, r) = verify_and_collect_result(*addr, 0, num_of_version * 2, root, &proof, configs.fanout);
-            let elapse = start.elapsed().as_nanos();
-            search_prove += elapse;
-            let true_states: Vec<(CompoundKey, StateValue)> = (1..=num_of_version).map(|k| {
-                let compound_key = CompoundKey::new(*addr, k*2);
-                (compound_key, H256::from_low_u64_be((k * 2) as u64).into())
-            }).collect();
-            if b == false {
-                println!("false");
-            }
-            let r = r.unwrap();
-            if true_states != r {
-                println!("true states: {:?}", true_states);
-                println!("r: {:?}", r);
-            }
-        }
-        println!("avg search prove: {}", search_prove / (num_of_contract * num_of_addr) as u128); */
-
-        /* let mut search_prove = 0;
-        for addr in &addr_key_vec {
-            for i in 1..=num_of_version {
-                let start = std::time::Instant::now();
-                let proof = cole_star.search_with_proof(*addr, (2 * i) as u32, (2 * i) as u32);
-                let (b, r) = verify_and_collect_result(*addr, (2 * i) as u32, (2 * i) as u32, root, &proof, configs.fanout);
-                let elapse = start.elapsed().as_nanos();
-                search_prove += elapse;
-                if b == false {
-                    println!("false");
-                }
-                let r = r.unwrap();
-                let compound_key = CompoundKey::new(*addr, i * 2);
-                let value = (compound_key, StateValue(H256::from_low_u64_be((i * 2) as u64)));
-                let true_states = vec![value];
-                if true_states != r {
-                    println!("true states: {:?}", true_states);
-                    println!("r: {:?}", r);
-                }
-            }
-        }
-        println!("avg search prove: {}", search_prove / (num_of_contract * num_of_addr * num_of_version) as u128); */
-
-        // std::thread::sleep(std::time::Duration::from_secs(30));
-        // drop(cole_star);
-        // let load = ColeStar::load(&configs);
-        // println!("load: {:?}", load);
     }
 }
