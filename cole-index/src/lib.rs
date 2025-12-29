@@ -479,7 +479,7 @@ mod tests {
         std::fs::create_dir(dir_name).unwrap_or_default();
         let base_state_num = 45000;
         let size_ratio = 10;
-        let configs = Configs::new(fanout, epsilon, dir_name.to_string(), base_state_num, size_ratio, false);
+        let configs = Configs::new(fanout, epsilon, dir_name.to_string(), base_state_num, size_ratio, false, false, false);
         let mut state_vec = Vec::<(CompoundKey, StateValue)>::new();
         let mut addr_key_vec = Vec::<AddrKey>::new();
         for _ in 1..=num_of_contract {

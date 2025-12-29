@@ -6,6 +6,7 @@ use eth_execution_engine::common::{tx_req::TxRequest, nonce::Nonce};
 use eth_execution_engine::{mpt_backend::MPTExecutorBackend, cole_index_backend::ColeIndexBackend, cole_plus_backend::ColePlusBackend, cole_star_backend::ColeStarBackend, cole_plus_async_backend::ColePlusAsyncBackend};
 use eth_execution_engine::cole_plus_ablation_siri_backend::ColePlusSIRIBackend;
 use eth_execution_engine::cole_ablation_layout_backend::ColeAblationLayoutBackend;
+use eth_execution_engine::cole_plus_ablation_binary_search::ColePlusBinarySearchBackend;
 use utils::{types::Address, config::Configs};
 use rand::prelude::*;
 use rocksdb::{OptimisticTransactionDB, Options, SingleThreaded};
@@ -262,6 +263,7 @@ pub fn test_backend_latency(params: &LatencyParams, mut backend: (impl BackendWr
         requests.clear();
     }
     timestamp_file.flush().unwrap();
+    storage_size_file.flush().unwrap();
     backend.flush();
     drop(backend);
     return Ok(());
@@ -291,7 +293,7 @@ pub fn test_cole_index_backend_latency(params: &LatencyParams) -> Result<()> {
     }
     std::fs::create_dir(db_path).unwrap_or_default();
     // note that here the mem_size is the number of records in the memory, rather than the actual size like 64 MB
-    let configs = Configs::new(params.mht_fanout, params.epsilon as i64, db_path.to_string(), params.mem_size, params.size_ratio, false);
+    let configs = Configs::new(params.mht_fanout, params.epsilon as i64, db_path.to_string(), params.mem_size, params.size_ratio, false, false, false);
     let backend = ColeIndexBackend::new(&configs, db_path);
     test_backend_latency(params, backend).unwrap();
     Ok(())
@@ -304,7 +306,7 @@ pub fn test_cole_star_backend_latency(params: &LatencyParams) -> Result<()> {
     }
     std::fs::create_dir(db_path).unwrap_or_default();
     // note that here the mem_size is the number of records in the memory, rather than the actual size like 64 MB
-    let configs = Configs::new(params.mht_fanout, params.epsilon as i64, db_path.to_string(), params.mem_size, params.size_ratio, false);
+    let configs = Configs::new(params.mht_fanout, params.epsilon as i64, db_path.to_string(), params.mem_size, params.size_ratio, false, false, false);
     let backend = ColeStarBackend::new(&configs, db_path);
     test_backend_latency(params, backend).unwrap();
     Ok(())
@@ -318,8 +320,8 @@ pub fn test_cole_plus_backend_latency(params: &LatencyParams, is_pruned: bool) -
     std::fs::create_dir(db_path).unwrap_or_default();
 
     // note that here the mem_size is the number of records in the memory, rather than the actual size like 64 MB
-    let configs = Configs::new(params.mht_fanout, params.epsilon as i64, db_path.to_string(), params.mem_size, params.size_ratio, is_pruned);
-    let backend = ColePlusBackend::new(&configs, db_path);
+    let configs = Configs::new(params.mht_fanout, params.epsilon as i64, db_path.to_string(), params.mem_size, params.size_ratio, is_pruned, false, false);
+    let backend = ColePlusBackend::new(&configs, db_path, 0);
     test_backend_latency(params, backend).unwrap();
     Ok(())
 }
@@ -332,7 +334,7 @@ pub fn test_cole_plus_async_backend_latency(params: &LatencyParams, is_pruned: b
     std::fs::create_dir(db_path).unwrap_or_default();
 
     // note that here the mem_size is the number of records in the memory, rather than the actual size like 64 MB
-    let configs = Configs::new(params.mht_fanout, params.epsilon as i64, db_path.to_string(), params.mem_size, params.size_ratio, is_pruned);
+    let configs = Configs::new(params.mht_fanout, params.epsilon as i64, db_path.to_string(), params.mem_size, params.size_ratio, is_pruned, false, false);
     let backend = ColePlusAsyncBackend::new(&configs, db_path);
     test_backend_latency(params, backend).unwrap();
     Ok(())
@@ -359,7 +361,7 @@ pub fn test_cole_plus_ablation_siri_backend_latency(params: &LatencyParams) -> R
     std::fs::create_dir(db_path).unwrap_or_default();
 
     // note that here the mem_size is the number of records in the memory, rather than the actual size like 64 MB
-    let configs = Configs::new(params.mht_fanout, params.epsilon as i64, db_path.to_string(), params.mem_size, params.size_ratio, false);
+    let configs = Configs::new(params.mht_fanout, params.epsilon as i64, db_path.to_string(), params.mem_size, params.size_ratio, false, false, false);
     let backend = ColePlusSIRIBackend::new(&configs, db_path);
     test_backend_latency(params, backend).unwrap();
     Ok(())
@@ -373,8 +375,22 @@ pub fn test_cole_ablation_layout_backend_latency(params: &LatencyParams) -> Resu
     std::fs::create_dir(db_path).unwrap_or_default();
 
     // note that here the mem_size is the number of records in the memory, rather than the actual size like 64 MB
-    let configs = Configs::new(params.mht_fanout, params.epsilon as i64, db_path.to_string(), params.mem_size, params.size_ratio, false);
+    let configs = Configs::new(params.mht_fanout, params.epsilon as i64, db_path.to_string(), params.mem_size, params.size_ratio, false, false, false);
     let backend = ColeAblationLayoutBackend::new(&configs, db_path);
+    test_backend_latency(params, backend).unwrap();
+    Ok(())
+}
+
+pub fn test_cole_plus_ablation_binary_search_latency(params: &LatencyParams) -> Result<()> {
+    let db_path = params.db_path.as_str();
+    if Path::new(db_path).exists() {
+        std::fs::remove_dir_all(db_path).unwrap_or_default();
+    }
+    std::fs::create_dir(db_path).unwrap_or_default();
+
+    // note that here the mem_size is the number of records in the memory, rather than the actual size like 64 MB
+    let configs = Configs::new(params.mht_fanout, params.epsilon as i64, db_path.to_string(), params.mem_size, params.size_ratio, false, false, false);
+    let backend = ColePlusBinarySearchBackend::new(&configs, db_path);
     test_backend_latency(params, backend).unwrap();
     Ok(())
 }
@@ -405,6 +421,9 @@ pub fn test_index_backend_latency(params: &LatencyParams) -> Result<()> {
         test_cole_plus_ablation_siri_backend_latency(params)
     } else if index_name == "cole_ablation_layout" {
         test_cole_ablation_layout_backend_latency(params)
+    }
+    else if index_name == "cole_plus_ablation_binary_search" {
+        test_cole_plus_ablation_binary_search_latency(params)
     }
     else {
         Err(anyhow!("wrong index name"))

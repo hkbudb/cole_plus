@@ -209,7 +209,7 @@ pub fn cole_index_backend_read_test(params: &ReadParams) -> Result<()> {
     }
     std::fs::create_dir(db_path).unwrap_or_default();
     // note that here the mem_size is the number of records in the memory, rather than the actual size like 64 MB
-    let configs = Configs::new(params.mht_fanout, params.epsilon as i64, db_path.to_string(), params.mem_size, params.size_ratio, false);
+    let configs = Configs::new(params.mht_fanout, params.epsilon as i64, db_path.to_string(), params.mem_size, params.size_ratio, false, false, false);
     let mut backend = ColeIndexBackend::new(&configs, db_path);
     let (block_id, mut state_keys) = build_db(params, &mut backend);
     state_keys.sort();
@@ -238,8 +238,8 @@ pub fn cole_plus_backend_read_test(params: &ReadParams) -> Result<()> {
     }
     std::fs::create_dir(db_path).unwrap_or_default();
     // note that here the mem_size is the number of records in the memory, rather than the actual size like 64 MB
-    let configs = Configs::new(params.mht_fanout, params.epsilon as i64, db_path.to_string(), params.mem_size, params.size_ratio, false);
-    let mut backend = ColePlusBackend::new(&configs, db_path);
+    let configs = Configs::new(params.mht_fanout, params.epsilon as i64, db_path.to_string(), params.mem_size, params.size_ratio, false, false, false);
+    let mut backend = ColePlusBackend::new(&configs, db_path, 0);
     let (block_id, mut state_keys) = build_db(params, &mut backend);
     state_keys.sort();
     println!("after build db, block_id: {}", block_id);

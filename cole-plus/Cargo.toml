@@ -14,3 +14,4 @@ merkle-btree-storage = { version = "0.1.0", path = "../merkle-btree-storage" }
 utils = { version = "0.1.0", path = "../utils" }
 pattern-oridented-split-tree = { version = "0.1.0", path = "../pattern-oridented-split-tree" }
 growable-bloom-filter = { version = "2.0.1", path = "../growable-bloom-filters" }
+serde_json = "1.0"

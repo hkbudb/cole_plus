@@ -302,6 +302,8 @@ pub fn in_memory_merge_ablation_design(mut inputs: Vec<InMemStateIteratorOld>, o
     // let mut model_timer = 0;
     let mut latest_compound_key = CompoundKey::default();
     let mut latest_value = StateValue::default();
+    // let mut total_learned_keys = 0;
+    // let mut latest_learned_keys = 0;
     while full_cnt < k {
         // pop the smallest state from the heap
         let elem = minheap.pop().unwrap();
@@ -311,6 +313,7 @@ pub fn in_memory_merge_ablation_design(mut inputs: Vec<InMemStateIteratorOld>, o
             // add the state's key to the model constructor
             // let start = std::time::Instant::now();
             model_constructor.append_state_key(&state.0);
+            // total_learned_keys += 1;
             // let elapse = start.elapsed().as_nanos();
             // model_timer += elapse;
             // insert the state's key to the bloom filter
@@ -333,6 +336,7 @@ pub fn in_memory_merge_ablation_design(mut inputs: Vec<InMemStateIteratorOld>, o
                 if latest_compound_key != CompoundKey::default() {
                     latest_state_model_constructor.append_state_key(&latest_compound_key);
                     latest_state_writer.append((latest_compound_key, latest_value));
+                    // latest_learned_keys += 1;
                 }
             }
             latest_compound_key = state.0;
@@ -380,9 +384,11 @@ pub fn in_memory_merge_ablation_design(mut inputs: Vec<InMemStateIteratorOld>, o
     if latest_compound_key != CompoundKey::default() {
         latest_state_model_constructor.append_state_key(&latest_compound_key);
         latest_state_writer.append((latest_compound_key, latest_value));
+        // latest_learned_keys += 1;
     }
     latest_state_writer.flush();
     latest_state_model_constructor.finalize_append();
+    // print!("total learned keys: {}, latest learned keys: {}", total_learned_keys, latest_learned_keys);
     return (state_writer, latest_state_writer, model_constructor.output_model_writer, latest_state_model_constructor.output_model_writer, mht_constructor.output_mht_writer, filter);
 }
 
@@ -422,6 +428,8 @@ pub fn merge_ablation_design(mut inputs: Vec<StateIteratorOld>, output_state_fil
     let mut full_cnt = 0;
     let mut latest_compound_key = CompoundKey::default();
     let mut latest_value = StateValue::default();
+    // let mut total_learned_keys = 0;
+    // let mut latest_learned_keys = 0;
     while full_cnt < k {
         // pop the smallest state from the heap
         let elem = minheap.pop().unwrap();
@@ -430,6 +438,7 @@ pub fn merge_ablation_design(mut inputs: Vec<StateIteratorOld>, output_state_fil
         if state != min_state && state != max_state {
             // add the state's key to the model constructor
             model_constructor.append_state_key(&state.0);
+            // total_learned_keys += 1;
             // insert the state's key to the bloom filter
             if filter.is_some() {
                 let addr_key = state.0.addr;
@@ -449,6 +458,7 @@ pub fn merge_ablation_design(mut inputs: Vec<StateIteratorOld>, output_state_fil
                 if latest_compound_key != CompoundKey::default() {
                     latest_state_model_constructor.append_state_key(&latest_compound_key);
                     latest_state_writer.append((latest_compound_key, latest_value));
+                    // latest_learned_keys += 1
                 }
             }
             latest_compound_key = state.0;
@@ -492,9 +502,11 @@ pub fn merge_ablation_design(mut inputs: Vec<StateIteratorOld>, output_state_fil
     if latest_compound_key != CompoundKey::default() {
         latest_state_model_constructor.append_state_key(&latest_compound_key);
         latest_state_writer.append((latest_compound_key, latest_value));
+        // latest_learned_keys += 1
     }
     latest_state_writer.flush();
     latest_state_model_constructor.finalize_append();
+    // print!("total learned keys: {}, latest learned keys: {}", total_learned_keys, latest_learned_keys);
     return (state_writer, latest_state_writer, model_constructor.output_model_writer, latest_state_model_constructor.output_model_writer, mht_constructor.output_mht_writer, filter);
 }
 
@@ -603,6 +615,8 @@ mod tests {
             base_state_num: n as usize,
             size_ratio: k as usize,
             is_pruned: false,
+            test_in_mem_roll: false,
+            test_disk_roll: false,
         };
 
         let run = LevelRun::construct_run_by_in_memory_merge(iters, run_id, level_id, &configs.dir_name, configs.epsilon, configs.fanout, configs.max_num_of_states_in_a_run(level_id), 1, k as usize);

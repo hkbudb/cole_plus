@@ -43,13 +43,14 @@ tar xfvz ycsb-0.17.0.tar.gz
 sudo apt -y install default-jdk
 sudo apt -y install default-jre
 ```
-* Use scripts `build_ycsb_uniform.sh` and `build_ycsb_zipfian.sh` to generate `readonly`, `writeonly`, and `readwriteeven` datasets
+* Use scripts `build_ycsb_uniform.sh` and `build_ycsb_zipfian.sh` to generate `readonly`, `writeonly`, and `readwriteeven` datasets.
 ```
 cd ~/cole-plus/exp
-./build_ycsb.sh
+./build_ycsb_uniform.sh
+./build_ycsb_zipfian.sh
 ```
 
-* After the build process finishes, three `txt` files will be generate:
+* After the build process finishes, six `txt` files will be generate:
     * `cole-plus/exp/readonly/readonly-zipfian-data.txt`
     * `cole-plus/exp/readonly/readonly-uniform-data.txt`
     * `cole-plus/exp/writeonly/writeonly-zipfian-data.txt`
@@ -65,6 +66,21 @@ cd ~/cole-plus/exp/
 
 * After the build process finishes, a file named `cole-plus/exp/prov/prov-data.txt` will be generated.
 
+## Prepare Reorganization Dataset
+
+* Use scripts `build_short_reorg_uniform.sh` and `build_large_reorg_uniform.sh` to generate `short-reorg`, and `large-reorg`datasets.
+
+```
+cd ~/cole-plus/exp
+./build_short_reorg_uniform.sh
+./build_large_reorg_uniform.sh
+```
+
+* After the build process finishes, two `txt` files will be generate:
+    * `cole-plus/exp/short-reorg/short-reorg-uniform-data.txt`
+    * `cole-plus/exp/large-reorg/large-reorg-uniform-data.txt`
+
+
 ## Run Script
 ```
 cd ~/cole-plus/exp/
@@ -72,7 +88,10 @@ python3 run.py
 ```
 
 * Use functions like `test_overall_kvstore()` and `test_prov()` in `cole-plus/exp/run.py` to evaluate the workload of `KVStore` and provenance query performance.
-* You may select different scales `scale = [3000000, 6000000, 30000000, 60000000]` or different indexes `indexes = ["cole_star", "cole_plus_async_archive", "cole_plus_async_prune", "cole_plus_ablation_siri", "cole_ablation_layout"]`
+    * You may select different scales `scale = [3000000, 6000000, 30000000, 60000000]` or different indexes `indexes = ["cole_star", "cole_plus_async_archive", "cole_plus_async_prune", "cole_plus_ablation_siri", "cole_ablation_layout"]`.
+* Use functions `test_short_reorg("uniform")` and `test_large_reorg("uniform")` to evaluate the workload of short block rewinding and large block rewinding.
+    * You may change different numbers of rewinding blocks in `rewind_blocks_list`.
+
 
 ## Check the Result
 

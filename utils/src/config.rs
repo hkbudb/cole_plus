@@ -5,10 +5,12 @@ pub struct Configs {
     pub base_state_num: usize, // number of states in the in-memory level
     pub size_ratio: usize, // ratio of the number of states in between the two consecutive levels
     pub is_pruned: bool,
+    pub test_in_mem_roll: bool,
+    pub test_disk_roll: bool,
 }
 
 impl Configs {
-    pub fn new(fanout: usize, epsilon: i64, dir_name: String, base_state_num: usize, size_ratio: usize, is_pruned: bool) -> Self {
+    pub fn new(fanout: usize, epsilon: i64, dir_name: String, base_state_num: usize, size_ratio: usize, is_pruned: bool, test_in_mem_roll: bool, test_disk_roll: bool) -> Self {
         Self {
             fanout,
             epsilon,
@@ -16,6 +18,8 @@ impl Configs {
             base_state_num,
             size_ratio,
             is_pruned,
+            test_in_mem_roll: test_in_mem_roll,
+            test_disk_roll,
         }
     }
 

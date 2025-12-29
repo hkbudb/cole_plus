@@ -1,6 +1,6 @@
 use growable_bloom_filter::GrowableBloom;
 use primitive_types::{H160, H256};
-use utils::{cacher::CacheManager, merge_sort::{in_memory_collect, merge_state}, pager::{cdc_mht::{reconstruct_cdc_range_proof, CDCRangeProof, CDCTreeReader, VerObject}, model_pager::ModelPageReader, state_pager::{StateIterator, StatePageReader}, upper_mht::{reconstruct_upper_range_proof, UpperMHTRangeProof, UpperMHTReader}}, types::{bytes_hash, AddrKey, Address, CompoundKey, StateKey, StateValue}, OpenOptions, Read, Write};
+use utils::{cacher::CacheManager, merge_sort::{in_memory_collect_with_block_range, merge_state_with_block_range}, pager::{cdc_mht::{reconstruct_cdc_range_proof, CDCRangeProof, CDCTreeReader, VerObject}, model_pager::ModelPageReader, state_pager::{StateIterator, StatePageReader}, upper_mht::{reconstruct_upper_range_proof, UpperMHTRangeProof, UpperMHTReader}}, types::{bytes_hash, AddrKey, Address, CompoundKey, StateKey, StateValue}, OpenOptions, Read, Write};
 use utils::config::Configs;
 use std::fmt::{Debug, Formatter, Error};
 use serde::{Serialize, Deserialize};
@@ -16,6 +16,8 @@ pub struct LevelRun {
     pub filter: Option<GrowableBloom>, // bloom filter
     pub filter_hash: Option<H256>, // filter's hash
     pub digest: H256, // a digest of mht_root and filter's hash if filter exists
+    pub block_range_low: u32,
+    pub block_range_high: u32,
 }
 
 impl LevelRun {
@@ -60,6 +62,7 @@ impl LevelRun {
         }
 
         let digest = Self::load_digest(mht_root, &filter_hash);
+
         Self {
             run_id,
             state_reader,
@@ -69,6 +72,8 @@ impl LevelRun {
             filter,
             filter_hash,
             digest,
+            block_range_low: 0,
+            block_range_high: 0,
         }
     }
 
@@ -101,7 +106,7 @@ impl LevelRun {
             filter = Some(GrowableBloom::new(FILTER_FP_RATE, max_num_of_state));
         }
         // merge the input states and construct the new state file, model file, mht file and insert state's keys to the filter
-        let (state_reader, model_reader, upper_mht_reader, lower_cdc_tree_reader,  filter) = in_memory_collect(state_vec, &state_file_name, &model_file_name, &upper_offset_file_name, &upper_hash_file_name, &lower_cdc_file_name, fanout, filter, is_pruned);
+        let (block_range_low, block_range_high, state_reader, model_reader, upper_mht_reader, lower_cdc_tree_reader,  filter) = in_memory_collect_with_block_range(state_vec, &state_file_name, &model_file_name, &upper_offset_file_name, &upper_hash_file_name, &lower_cdc_file_name, fanout, filter, is_pruned);
         
         let mht_root = upper_mht_reader.mht_reader.root.unwrap();
         let mut filter_hash = None;
@@ -121,6 +126,8 @@ impl LevelRun {
             filter,
             filter_hash,
             digest,
+            block_range_low,
+            block_range_high,
         }
     }
 
@@ -138,7 +145,7 @@ impl LevelRun {
             filter = Some(GrowableBloom::new(FILTER_FP_RATE, max_num_of_state));
         }
         // merge the input states and construct the new state file, model file, mht file and insert state's keys to the filter
-        let (state_reader, model_reader, upper_mht_reader, lower_cdc_tree_reader, filter) = merge_state(input_states, lower_cdc_tree_readers, upper_mht_readers, &state_file_name, &model_file_name, &upper_offset_file_name, &upper_hash_file_name, &lower_cdc_file_name, fanout, filter, is_pruned);
+        let (block_range_low, block_range_high, state_reader, model_reader, upper_mht_reader, lower_cdc_tree_reader, filter) = merge_state_with_block_range(input_states, lower_cdc_tree_readers, upper_mht_readers, &state_file_name, &model_file_name, &upper_offset_file_name, &upper_hash_file_name, &lower_cdc_file_name, fanout, filter, is_pruned);
         
         let mht_root = upper_mht_reader.mht_reader.root.unwrap();
         let mut filter_hash = None;
@@ -158,6 +165,8 @@ impl LevelRun {
             filter,
             filter_hash,
             digest,
+            block_range_low,
+            block_range_high,
         }
     }
 
@@ -196,6 +205,23 @@ impl LevelRun {
         let pred_page_id = self.model_reader.get_pred_state_page_id(self.run_id, compound_key, false, cache_manager);
         let (compound_key, state_value) = self.state_reader.query_page_state(compound_key, self.run_id, pred_page_id, cache_manager);
         return Some((compound_key.addr, compound_key.version, state_value));
+    }
+
+    pub fn load_run_states(&mut self,) -> Vec<(CompoundKey, StateValue)> {
+        let mut result: Vec<(CompoundKey, StateValue)> = Vec::new();
+        let latest_states = self.state_reader.read_all_state(self.run_id);
+        let offset_num = self.upper_mht_reader.merkle_offset_reader.num_of_merkle_offset as usize;
+        let mut temp_cache_manager = CacheManager::new();
+        // we have two more states for min and max boundary
+        // therefore, we need to skip first and the last
+        for (i, latest_s) in latest_states[1 .. 1+offset_num].iter().enumerate() {
+            let cdc_tree_addr = self.upper_mht_reader.merkle_offset_reader.read_merkle_offset(self.run_id, i, &mut temp_cache_manager);
+            let lower_cdc_tree = self.lower_cdc_tree_reader.read_tree_at(cdc_tree_addr, self.run_id, &mut temp_cache_manager).unwrap();
+            let verobjects = lower_cdc_tree.load_all_key_values();
+            let cur_states: Vec<(CompoundKey, StateValue)> = verobjects.into_iter().map(|s| (CompoundKey::new(latest_s.0.addr, s.ver), s.value)).collect();
+            result.extend(cur_states);
+        }
+        return result;
     }
 
     pub fn prove_range(&mut self, addr_key: AddrKey, lb: u32, ub: u32, configs: &Configs, cache_manager: &mut CacheManager) -> (Option<Vec<VerObject>>, RunProof) {
@@ -565,7 +591,7 @@ mod tests {
             std::fs::remove_dir_all(dir_name).unwrap_or_default();
         }
         std::fs::create_dir(dir_name).unwrap_or_default();
-        let configs = Configs::new(fanout, 0, dir_name.to_string(), n, size_ratio, false);
+        let configs = Configs::new(fanout, 0, dir_name.to_string(), n, size_ratio, false, false, false);
         let mut state_vec = Vec::<(CompoundKey, StateValue)>::new();
         let mut addr_key_vec = generate_addr_keys(num_of_contract, num_of_state, &mut rng);
         addr_key_vec.sort();
@@ -665,7 +691,7 @@ mod tests {
             std::fs::remove_dir_all(dir_name).unwrap_or_default();
         }
         std::fs::create_dir(dir_name).unwrap_or_default();
-        let configs = Configs::new(fanout, 0, dir_name.to_string(), n, size_ratio, false);
+        let configs = Configs::new(fanout, 0, dir_name.to_string(), n, size_ratio, false, false, false);
 
         let mut addr_key_vec = generate_addr_keys(num_of_contract, num_of_state, &mut rng);
         addr_key_vec.sort();

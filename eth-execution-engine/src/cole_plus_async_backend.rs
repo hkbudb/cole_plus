@@ -140,7 +140,7 @@ mod tests {
     use rand::prelude::*;
     use primitive_types::H160;
     use cole_plus_async::verify_and_collect_result;
-    use utils::{compute_cole_size_breakdown, disk_usage_check_directory_storage};
+    use utils::compute_cole_size_breakdown;
 
     #[test]
     fn test_cole_plus_prune_async_backend_storage() {
@@ -152,7 +152,7 @@ mod tests {
         std::fs::create_dir(dir_name).unwrap_or_default();
         let base_state_num = 500;
         let size_ratio = 5;
-        let configs = Configs::new(fanout, 0, dir_name.to_string(), base_state_num, size_ratio, false);
+        let configs = Configs::new(fanout, 0, dir_name.to_string(), base_state_num, size_ratio, false, false, false);
         let caller_address = Address::from(H160::from_low_u64_be(1));
         let mut backend = ColePlusAsyncBackend::new(&configs, dir_name);
 
@@ -166,7 +166,7 @@ mod tests {
         }
         let mut rng = StdRng::seed_from_u64(1);
 
-        let n = 1000;
+        let n = 10000;
         let small_bank_n = n / 100;
         let mut requests = Vec::new();
         for i in 0..n {
@@ -191,7 +191,7 @@ mod tests {
         
         // println!("sleep");
         // std::thread::sleep(std::time::Duration::from_secs(30));
-        let mut search_latest = 0;
+        /* let mut search_latest = 0;
         for (k, v) in states {
             let start = std::time::Instant::now();
             let (_, _, read_v) = backend.states.search_latest_state_value(k).unwrap();
@@ -204,7 +204,7 @@ mod tests {
         println!("before flush storage: {}", before_flush_storage);
         drop(backend);
         let storage_size = compute_cole_size_breakdown(dir_name);
-        println!("storage size: {:?}", storage_size);
+        println!("storage size: {:?}", storage_size); */
     }
 
     #[test]
@@ -217,7 +217,7 @@ mod tests {
         std::fs::create_dir(dir_name).unwrap_or_default();
         let base_state_num = 100;
         let size_ratio = 5;
-        let configs = Configs::new(fanout, 0, dir_name.to_string(), base_state_num, size_ratio, false);
+        let configs = Configs::new(fanout, 0, dir_name.to_string(), base_state_num, size_ratio, false, false, false);
         let caller_address = Address::from(H160::from_low_u64_be(1));
         let mut backend = ColePlusAsyncBackend::new(&configs, dir_name);
 

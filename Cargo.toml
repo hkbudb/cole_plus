@@ -18,5 +18,6 @@ members = [
     "letus_new", 
     "poly-rolling", 
     "siri-tree", 
-    "cole-plus-ablation-siri", "cole-ablation-layout",
+    "cole-plus-ablation-siri", "cole-ablation-layout", 
+    "cole-plus-ablation-binary-search",
 ]

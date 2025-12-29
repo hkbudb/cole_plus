@@ -1,5 +1,6 @@
 use std::cmp::{Ordering, PartialOrd, Ord};
 use std::collections::{BinaryHeap, HashMap};
+use std::u32;
 use primitive_types::{H160, H256};
 use crate::cacher::CacheManager;
 use crate::pager::cdc_mht::{merge_two_cdc_trees, CDCTree, CDCTreeReader, CDCTreeWriter, VerObject};
@@ -44,6 +45,175 @@ impl Ord for InMemMergeElement {
     fn cmp(&self, other: &Self) -> Ordering {
         return other.state.0.cmp(&self.state.0);
     }
+}
+
+pub fn merge_state_with_block_range(mut input_states: Vec<StateIterator>, mut lower_cdc_tree_readers: Vec::<CDCTreeReader>, mut upper_mht_readers: Vec::<(u32, UpperMHTReader)>, output_state_file_name: &str, output_model_file_name: &str, output_upper_offset_file_name: &str, output_upper_hash_file_name: &str, output_lower_cdc_file_name: &str, fanout: usize, mut filter: Option<GrowableBloom>, is_pruned: bool) -> (u32, u32, StatePageReader, ModelPageReader, UpperMHTReader, CDCTreeReader, Option<GrowableBloom>) {
+    let mut block_range_low: u32 = u32::MAX;
+    let mut block_range_high: u32 = u32::MIN; 
+
+    // create a writer for recording the states
+    let mut state_writer = StatePageWriter::create(output_state_file_name);
+    // create a writer for models
+    let mut model_constructor = ModelConstructor::new(output_model_file_name);
+    // create upper mht writer and lower cdc tree writer
+    let mut upper_mht_writer = UpperMHTWriter::new(output_upper_offset_file_name, output_upper_hash_file_name, fanout);
+    let mut lower_cdc_tree_writer = CDCTreeWriter::new(output_lower_cdc_file_name);
+    // create an offset counter map to record the offset of k merging cdc-trees
+    let mut offset_index_counter = HashMap::<usize, usize>::new();
+    
+    let mut min_heap = BinaryHeap::<MergeElement>::new();
+    let k = input_states.len();
+    // before adding the actual state, add a min_boundary state to help the completeness check
+    let min_state = (AddrKey::new(Address(H160::from_low_u64_be(0)), StateKey(H256::from_low_u64_be(0))), 0u32, StateValue(H256::from_low_u64_be(0)));
+    let max_state = (AddrKey::new(Address(H160::from_slice(&vec![255u8;20])), StateKey(H256::from_slice(&vec![255u8;32]))), u32::MAX, StateValue(H256::from_low_u64_be(0)));
+    // println!("write {:?}", min_state);
+    state_writer.append(min_state);
+
+    // add the first elems from each iterator, init the offset counter map
+    for i in 0..k {
+        // get the first element of the i-th input iterator
+        let r = input_states[i].next().unwrap();
+        let elem = MergeElement {
+            state: r,
+            i,
+        };
+        min_heap.push(elem);
+        offset_index_counter.insert(i, 0); // set each offset of cdc tree to be 0
+    }
+    // create a temp var
+    let mut temp_var: (AddrKey, Vec<(u32, StateValue)>) = (min_state.0, vec![]);
+    // create a temp cdc_tree
+    let mut lower_cdc_tree = CDCTree::new(DEFAULT_FANOUT, DEFAULT_GEAR_HASH_LEVEL, DEFAULT_MAX_NODE_CAPACITY);
+    // flag of number of full iterators
+    let mut full_cnt = 0;
+    let mut prev_input_index = 0;
+    let mut temp_cache_manager = CacheManager::new();
+    while full_cnt < k {
+        // pop the smallest elem from the heap
+        let elem = min_heap.pop().unwrap();
+        let state = elem.state;
+        let input_index = elem.i;
+
+        let ver = state.0.version;
+        // rewind related block id:
+        if ver != 0 && ver != u32::MAX  && ver < block_range_low {
+            block_range_low = ver;
+        }
+        if ver != 0 && ver != u32::MAX  && ver > block_range_high {
+            block_range_high = ver;
+        }
+        // check whether the states' addr_key is the same as the temp_var's addr_key
+        if state.0.addr != temp_var.0 {
+            prev_input_index = input_index;
+            // different addr_key
+            // avoid duplication of adding the min and max state
+            if temp_var.0 != min_state.0 && temp_var.0 != max_state.0 {
+                // select the maximum version and its state value
+                let value_vec = &mut temp_var.1;
+                let mut max_version: u32 = 0;
+                let mut state_value: StateValue = H256::default().into();
+                for value in value_vec {
+                    let cur_ver = value.0;
+                    if cur_ver > max_version {
+                        max_version = cur_ver;
+                        state_value = value.1;
+                    }
+                }
+                // write the max_version and its state_value to the state_file
+                let model_key = state_writer.append((temp_var.0, max_version, state_value));
+                if let Some(inner_model_key) = model_key {
+                    model_constructor.append_state_key(&inner_model_key);
+                }
+                // insert the state's addr to the bloom filter
+                if let Some(inner_filter) = &mut filter {
+                    inner_filter.insert(temp_var.0);
+                }
+
+                // write the lower_cdc_tree
+                let addr_key = temp_var.0;
+                // prune states if is_pruned is true
+                if is_pruned {
+                    lower_cdc_tree.prune_tree_with_latest_version();
+                }
+                write_lower_cdc_tree(addr_key, &mut lower_cdc_tree, &mut lower_cdc_tree_writer, &mut upper_mht_writer);
+            }
+            temp_var = (state.0.addr, vec![(state.0.version, state.1)]);
+
+            if temp_var.0 != min_state.0 && temp_var.0 != max_state.0 {
+                // not the last addr_key, read states.0's cdc_tree as lower_cdc_tree
+                lower_cdc_tree = read_lower_cdc_tree(input_index, &mut offset_index_counter, &mut upper_mht_readers, &mut lower_cdc_tree_readers, &mut temp_cache_manager);
+            }
+        } else if state.0.addr != min_state.0 && state.0.addr != max_state.0 {
+            // same addr_key
+            temp_var.1.push((state.0.version, state.1)); // append the states' value vec to temp_var's value vec
+            if prev_input_index != input_index {
+                // read the same addr_key's corresponding lower_cdc_tree in the input_index's run
+                let another_lower_cdc_tree = read_lower_cdc_tree(input_index, &mut offset_index_counter, &mut upper_mht_readers, &mut lower_cdc_tree_readers, &mut temp_cache_manager);
+                // merge another_lower_cdc_tree to lower_cdc_tree
+                lower_cdc_tree = merge_two_cdc_trees(lower_cdc_tree, another_lower_cdc_tree).unwrap();
+                prev_input_index = input_index;
+            }
+        }
+
+        let i = elem.i;
+        let r = input_states[i].next();
+        if r.is_some() {
+            // load the next smallest elem from the iterator
+            let new_states = r.unwrap();
+            let elem = MergeElement {
+                state: new_states,
+                i,
+            };
+            // push the element to the heap
+            min_heap.push(elem);
+        } else {
+            // the iterator reaches the last
+            full_cnt += 1;
+        }
+    }
+
+    // handle the last element, temp_var
+    if temp_var.0 != min_state.0 && temp_var.0 != max_state.0 {
+        // select the maximum version and its state value
+        let value_vec = &mut temp_var.1;
+        let mut max_version: u32 = 0;
+        let mut state_value: StateValue = H256::default().into();
+        for value in value_vec {
+            let cur_ver = value.0;
+            if cur_ver > max_version {
+                max_version = cur_ver;
+                state_value = value.1;
+            }
+        }
+        // write the max_version and its state_value to the state_file
+        let model_key = state_writer.append((temp_var.0, max_version, state_value));
+        if let Some(inner_model_key) = model_key {
+            model_constructor.append_state_key(&inner_model_key);
+        }
+        // insert the state's addr to the bloom filter
+        if let Some(inner_filter) = &mut filter {
+            inner_filter.insert(temp_var.0);
+        }
+
+        // write the lower_cdc_tree
+        let addr_key = temp_var.0;
+        // prune states if is_pruned is true
+        if is_pruned {
+            lower_cdc_tree.prune_tree_with_latest_version();
+        }
+        write_lower_cdc_tree(addr_key, &mut lower_cdc_tree, &mut lower_cdc_tree_writer, &mut upper_mht_writer);
+    }
+
+    lower_cdc_tree_writer.finalize();
+    upper_mht_writer.finalize_write_mht_offset();
+
+    // add the max state to the writer 
+    state_writer.append(max_state);
+    // flush the state writer
+    state_writer.flush();
+    // flush the model writer
+    model_constructor.finalize_append();
+    (block_range_low, block_range_high, state_writer.to_state_reader(), model_constructor.output_model_writer.to_model_reader(), upper_mht_writer.to_upper_mht_reader(), lower_cdc_tree_writer.to_cdc_tree_reader(), filter)
 }
 
 pub fn merge_state(mut input_states: Vec<StateIterator>, mut lower_cdc_tree_readers: Vec::<CDCTreeReader>, mut upper_mht_readers: Vec::<(u32, UpperMHTReader)>, output_state_file_name: &str, output_model_file_name: &str, output_upper_offset_file_name: &str, output_upper_hash_file_name: &str, output_lower_cdc_file_name: &str, fanout: usize, mut filter: Option<GrowableBloom>, is_pruned: bool) -> (StatePageReader, ModelPageReader, UpperMHTReader, CDCTreeReader, Option<GrowableBloom>) {
@@ -201,6 +371,112 @@ pub fn merge_state(mut input_states: Vec<StateIterator>, mut lower_cdc_tree_read
     // flush the model writer
     model_constructor.finalize_append();
     (state_writer.to_state_reader(), model_constructor.output_model_writer.to_model_reader(), upper_mht_writer.to_upper_mht_reader(), lower_cdc_tree_writer.to_cdc_tree_reader(), filter)
+}
+
+pub fn in_memory_collect_with_block_range(state_vec: Vec<(CompoundKey, StateValue)>, output_state_file_name: &str, output_model_file_name: &str, output_upper_offset_file_name: &str, output_upper_hash_file_name: &str, output_lower_cdc_file_name: &str, fanout: usize, mut filter: Option<GrowableBloom>, is_pruned: bool) -> (u32, u32, StatePageReader, ModelPageReader, UpperMHTReader, CDCTreeReader, Option<GrowableBloom>) {
+    let mut block_range_low: u32 = u32::MAX;
+    let mut block_range_high: u32 = u32::MIN; 
+    // create a writer for recording the states
+    let mut state_writer = StatePageWriter::create(output_state_file_name);
+    // create a writer for models
+    let mut model_constructor = ModelConstructor::new(output_model_file_name);
+    let mut upper_mht_writer = UpperMHTWriter::new(output_upper_offset_file_name, output_upper_hash_file_name, fanout);
+    let mut cdc_tree_writer = CDCTreeWriter::new(output_lower_cdc_file_name);
+    // before adding the actual state, add a min_boundary state to help the completeness check
+    let min_state = (AddrKey::new(Address(H160::from_low_u64_be(0)), StateKey(H256::from_low_u64_be(0))), 0u32, StateValue(H256::from_low_u64_be(0)));
+    let max_state = (AddrKey::new(Address(H160::from_slice(&vec![255u8;20])), StateKey(H256::from_slice(&vec![255u8;32]))), u32::MAX, StateValue(H256::from_low_u64_be(0)));
+
+    state_writer.append(min_state);
+    // let mut model_timer = 0;
+    // collect each addr and their (ver, state_value), then build CDC-Tree and upper MHT
+    let mut prev_addr_key = AddrKey::default();
+    let mut prev_ver_objs = Vec::<VerObject>::new();
+    for state in state_vec {
+        let cur_addr_key = state.0.addr;
+        let ver = state.0.version;
+        // rewind related block id:
+        if ver != 0 && ver != u32::MAX  && ver < block_range_low {
+            block_range_low = ver;
+        }
+        if ver != 0 && ver != u32::MAX  && ver > block_range_high {
+            block_range_high = ver;
+        }
+        let value = state.1;
+        if cur_addr_key != min_state.0 && cur_addr_key != max_state.0 {
+            // try to remove min and max addr_key's value
+            if cur_addr_key != prev_addr_key {
+                // different addr_key, first handle the prev addr
+                if prev_addr_key != AddrKey::default() {
+                    let mut cdc_tree = CDCTree::new(DEFAULT_FANOUT, DEFAULT_GEAR_HASH_LEVEL, DEFAULT_MAX_NODE_CAPACITY);
+                    // choose to only store the latest ver_obj to the state file
+                    let latest_ver_obj = prev_ver_objs.last().unwrap().clone();
+                    let model_key = state_writer.append((prev_addr_key, latest_ver_obj.ver, latest_ver_obj.value));
+                    if let Some(inner_model_key) = model_key {
+                        // let start = std::time::Instant::now();
+                        model_constructor.append_state_key(&inner_model_key);
+                        // let elapse = start.elapsed().as_nanos();
+                        // model_timer += elapse;
+                    }
+                    // insert the state's addr to the bloom filter
+                    if let Some(inner_filter) = &mut filter {
+                        inner_filter.insert(prev_addr_key);
+                    }
+                    // keep all the versions in the Merkle tree
+                    cdc_tree.bulk_load(prev_ver_objs);
+                    // prune states if is_pruned is true
+                    if is_pruned {
+                        cdc_tree.prune_tree_with_latest_version();
+                    }
+                    // write cdc_tree
+                    write_lower_cdc_tree(prev_addr_key, &mut cdc_tree, &mut cdc_tree_writer, &mut upper_mht_writer);
+                }
+                prev_ver_objs = vec![VerObject::new(ver, value)];
+                prev_addr_key = cur_addr_key;
+            } else {
+                // same addr_key
+                prev_ver_objs.push(VerObject::new(ver, value));
+            }
+        }
+    }
+    // handle the last addr_key case
+    if !prev_ver_objs.is_empty() && prev_addr_key != AddrKey::default() {
+        let mut cdc_tree = CDCTree::new(DEFAULT_FANOUT, DEFAULT_GEAR_HASH_LEVEL, DEFAULT_MAX_NODE_CAPACITY);
+        // choose to only store the latest ver_obj to the state file
+        let latest_ver_obj = prev_ver_objs.last().unwrap().clone();
+        let model_key = state_writer.append((prev_addr_key, latest_ver_obj.ver, latest_ver_obj.value));
+        if let Some(inner_model_key) = model_key {
+            // let start = std::time::Instant::now();
+            model_constructor.append_state_key(&inner_model_key);
+            // let elapse = start.elapsed().as_nanos();
+            // model_timer += elapse;
+        }
+        // insert the state's addr to the bloom filter
+        if let Some(inner_filter) = &mut filter {
+            inner_filter.insert(prev_addr_key);
+        }
+        // keep all the versions in the Merkle tree
+        cdc_tree.bulk_load(prev_ver_objs);
+        // prune states if is_pruned is true
+        if is_pruned {
+            cdc_tree.prune_tree_with_latest_version();
+        }
+        // write cdc_tree
+        write_lower_cdc_tree(prev_addr_key, &mut cdc_tree, &mut cdc_tree_writer, &mut upper_mht_writer);
+    }
+    cdc_tree_writer.finalize();
+    upper_mht_writer.finalize_write_mht_offset();
+
+    // add the max state to the writer 
+    state_writer.append(max_state);
+    // flush the state writer
+    state_writer.flush();
+    // flush the model writer
+    // let start = std::time::Instant::now();
+    model_constructor.finalize_append();
+    // let elapse = start.elapsed().as_nanos();
+    // model_timer += elapse;
+    // println!("model timer: {}", model_timer);
+    (block_range_low, block_range_high, state_writer.to_state_reader(), model_constructor.output_model_writer.to_model_reader(), upper_mht_writer.to_upper_mht_reader(), cdc_tree_writer.to_cdc_tree_reader(), filter)
 }
 
 pub fn in_memory_collect(state_vec: Vec<(CompoundKey, StateValue)>, output_state_file_name: &str, output_model_file_name: &str, output_upper_offset_file_name: &str, output_upper_hash_file_name: &str, output_lower_cdc_file_name: &str, fanout: usize, mut filter: Option<GrowableBloom>, is_pruned: bool) -> (StatePageReader, ModelPageReader, UpperMHTReader, CDCTreeReader, Option<GrowableBloom>) {

@@ -689,7 +689,9 @@ pub fn remove<K: Num + LoadAddr, V: Value>(tree: &mut impl POSTreeNodeIO<K, V>, 
                 }
             }
         },
-        None => {}
+        None => {
+            
+        }
     }
 }
 

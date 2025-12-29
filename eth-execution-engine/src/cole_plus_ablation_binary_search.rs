@@ -1,39 +1,38 @@
 use super::common::{nonce::Nonce, code::Code, write_trait::BackendWriteTrait};
-use utils::types::CompoundKey;
-use utils::{disk_usage_check_directory_storage, MemCost};
-use utils::{types::{Address, StateKey, StateValue, AddrKey}, config::Configs};
+use utils::{config::Configs, disk_usage_check_directory_storage, types::{AddrKey, Address, StateKey, StateValue}};
 use super::tx_executor::Backend;
 use std::{cell::UnsafeCell, collections::BTreeMap};
 use anyhow::Result;
-use cole_ablation_layout::ColeAblationLayout;
+use cole_plus_ablation_binary_search::ColePlusBinary;
+use utils::MemCost;
 
-pub struct ColeAblationLayoutBackend<'a> {
+pub struct ColePlusBinarySearchBackend<'a> {
     pub nonce_map: BTreeMap<Address, Nonce>,
     pub code_map: BTreeMap<Address, Code>,
-    pub states: ColeAblationLayout<'a>,
+    pub states: ColePlusBinary<'a>,
     pub path: &'a str,
 }
 
-impl<'a> ColeAblationLayoutBackend<'a> {
+impl<'a> ColePlusBinarySearchBackend<'a> {
     pub fn new(configs: &'a Configs, path: &'a str) -> Self {
         Self {
             nonce_map: BTreeMap::new(), 
             code_map: BTreeMap::new(), 
-            states: ColeAblationLayout::new(configs),
+            states: ColePlusBinary::new(configs),
             path,
         }
     }
 
-    pub fn get_mut_total_tree(&self) -> &'a mut ColeAblationLayout<'a> {
+    pub fn get_mut_total_tree(&self) -> &'a mut ColePlusBinary<'a> {
         unsafe {
-            let const_ptr = &self.states as *const ColeAblationLayout;
-            let mut_ptr = UnsafeCell::new(const_ptr as *mut ColeAblationLayout);
+            let const_ptr = &self.states as *const ColePlusBinary;
+            let mut_ptr = UnsafeCell::new(const_ptr as *mut ColePlusBinary);
             &mut **mut_ptr.get()
         }
     }
 }
 
-impl<'a> Backend for ColeAblationLayoutBackend<'a> {
+impl<'a> Backend for ColePlusBinarySearchBackend<'a> {
     fn get_code(&self, acc_address: Address) -> Result<Code> {
         if self.code_map.contains_key(&acc_address) {
             Ok(self.code_map.get(&acc_address).unwrap().clone())
@@ -54,8 +53,8 @@ impl<'a> Backend for ColeAblationLayoutBackend<'a> {
         let addr_key = AddrKey::new(acc_address, key);
         let v = self.get_mut_total_tree().search_latest_state_value(addr_key);
         match v {
-            Some(v) => {
-                Ok(v)
+            Some((_, _, value)) => {
+                Ok(value)
             },
             None => {
                 return Ok(StateValue::default());
@@ -64,16 +63,14 @@ impl<'a> Backend for ColeAblationLayoutBackend<'a> {
     }
 }
 
-impl<'a> BackendWriteTrait for ColeAblationLayoutBackend<'a> {
+impl<'a> BackendWriteTrait for ColePlusBinarySearchBackend<'a> {
     fn single_write(&mut self, addr_key: AddrKey, v: StateValue, block_id: u32) {
-        let compound_key = CompoundKey::new(addr_key, block_id);
-        self.states.insert((compound_key, v));
+        self.states.insert((addr_key, block_id, v));
     }
 
     fn batch_write(&mut self, states: BTreeMap<AddrKey, StateValue>, block_id: u32) {
         for (addr_key, value) in states {
-            let compound_key = CompoundKey::new(addr_key, block_id);
-            self.states.insert((compound_key, value));
+            self.states.insert((addr_key, block_id, value));
         }
     }
 
@@ -108,7 +105,7 @@ impl<'a> BackendWriteTrait for ColeAblationLayoutBackend<'a> {
     }
 
     fn memory_cost(&self,) -> MemCost {
-        self.states.memory_cost()
+        MemCost::new(0, 0, 0)
     }
 
     fn index_stucture_output(&self,) -> String {
@@ -117,12 +114,14 @@ impl<'a> BackendWriteTrait for ColeAblationLayoutBackend<'a> {
     fn flush(&mut self) {
 
     }
+
     fn commit(&mut self) {
         
     }
 
     fn print_in_mem_tree(&self) {
-        
+        println!("{:?}", self.states.in_mem_group[0]);
+        println!("{:?}", self.states.in_mem_group[0]);
     }
 
     fn index_size(&self) -> usize {
@@ -140,21 +139,20 @@ mod tests {
     use super::*;
     use rand::prelude::*;
     use primitive_types::H160;
-    use utils::compute_cole_size_breakdown;
 
     #[test]
-    fn test_cole_ablation_layout_backend() {
+    fn test_cole_plus_binary_search_backend_storage() {
         let fanout = 5;
         let dir_name = "cole_storage";
         if std::path::Path::new(dir_name).exists() {
             std::fs::remove_dir_all(dir_name).unwrap_or_default();
         }
         std::fs::create_dir(dir_name).unwrap_or_default();
-        let base_state_num = 100;
+        let base_state_num = 500;
         let size_ratio = 5;
-        let configs = Configs::new(fanout, 23, dir_name.to_string(), base_state_num, size_ratio, true, false, false);
+        let configs = Configs::new(fanout, 0, dir_name.to_string(), base_state_num, size_ratio, false, false, false);
         let caller_address = Address::from(H160::from_low_u64_be(1));
-        let mut backend = ColeAblationLayoutBackend::new(&configs, dir_name);
+        let mut backend = ColePlusBinarySearchBackend::new(&configs, dir_name);
 
         let num_of_contract = 10;
         let mut contract_address_list = vec![];
@@ -166,7 +164,7 @@ mod tests {
         }
         let mut rng = StdRng::seed_from_u64(1);
 
-        let n = 5000;
+        let n = 10000;
         let small_bank_n = n / 100;
         let mut requests = Vec::new();
         for i in 0..n {
@@ -181,17 +179,15 @@ mod tests {
         let mut states = BTreeMap::<AddrKey, StateValue>::new();
         let start = std::time::Instant::now();
         for block in blocks {
-            // println!("block {}", i);
+            println!("block {}", i);
             let s = test_batch_exec_tx(block, caller_address, i, &mut backend);
             states.extend(s);
             i += 1;
         }
         let elapse = start.elapsed().as_nanos();
         println!("time: {}", elapse / n as u128);
+        
         // println!("sleep");
         // std::thread::sleep(std::time::Duration::from_secs(30));
-        drop(backend);
-        let storage_size = compute_cole_size_breakdown(dir_name);
-        println!("storage size: {:?}", storage_size);
     }
 }

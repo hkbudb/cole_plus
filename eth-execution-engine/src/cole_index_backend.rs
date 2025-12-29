@@ -154,7 +154,7 @@ mod tests {
         std::fs::create_dir(dir_name).unwrap_or_default();
         let base_state_num = 100;
         let size_ratio = 5;
-        let configs = Configs::new(fanout, 23, dir_name.to_string(), base_state_num, size_ratio, true);
+        let configs = Configs::new(fanout, 23, dir_name.to_string(), base_state_num, size_ratio, true, false, false);
         let caller_address = Address::from(H160::from_low_u64_be(1));
         let mut backend = ColeIndexBackend::new(&configs, dir_name);
 

@@ -11,9 +11,11 @@ use run::{reconstruct_run_proof, LevelRun, RunFilterSize, RunProof};
 use utils::{cacher::CacheManager, config::Configs, pager::{cdc_mht::{CDCTreeReader, VerObject}, state_pager::StateIterator, upper_mht::UpperMHTReader}, types::{compute_concatenate_hash, AddrKey, CompoundKey, StateValue}, MemCost, OpenOptions, Read, Write};
 use serde::{Serialize, Deserialize};
 use utils::DEFAULT_MAX_NODE_CAPACITY;
+use std::fs;
 
 pub struct InMemGroup {
     pub mem_mht: InMemoryPOSTree, // in-mem POS-tree
+    pub max_block_id: u32,
 }
 
 impl Debug for InMemGroup {
@@ -28,10 +30,12 @@ impl InMemGroup {
     pub fn new(exp_fanout: usize, max_fanout: usize) -> Self {
         Self {
             mem_mht: InMemoryPOSTree::new(exp_fanout, max_fanout),
+            max_block_id: 0,
         }
     }
     pub fn clear(&mut self) {
         self.mem_mht.clear();
+        self.max_block_id = 0;
     }
 
     pub fn get_mem_mht_ref(&self) -> &InMemoryPOSTree {
@@ -152,7 +156,7 @@ impl<'a> ColePlus<'a> {
         format!("{}/mht", &self.configs.dir_name)
     }
 
-    fn new_run_id(&mut self) -> u32 {
+    pub fn new_run_id(&mut self) -> u32 {
         // increment the run_id and return it
         self.run_id_cnt += 1;
         return self.run_id_cnt;
@@ -198,12 +202,15 @@ impl<'a> ColePlus<'a> {
         // insert the state to the tree of write group
         let tree_ref = &mut self.in_mem_group[write_index].mem_mht;
         pattern_oridented_split_tree::insert(tree_ref, CompoundKey::new(addr_key, ver), value);
+        if self.configs.test_in_mem_roll == true {
+            // reorg-related code
+            self.in_mem_group[write_index].max_block_id = ver;
+        }
         // check wheither the write group tree is full
         if tree_ref.key_num as usize == in_mem_thres {
             // get the merge group index
             let merge_index = self.get_merge_in_mem_group_index();
             if self.in_mem_group[merge_index].mem_mht.key_num as usize == in_mem_thres {
-                let start = std::time::Instant::now();
                 // merge group is full, the data should be merged to the run in the disk-level
                 let state_vec = self.in_mem_group[merge_index].mem_mht.load_all_key_values();
                 self.in_mem_group[merge_index].clear();
@@ -220,8 +227,7 @@ impl<'a> ColePlus<'a> {
                 };
                 
                 let run = LevelRun::construct_run_by_in_memory_collection(state_vec, run_id, level_id, &self.configs.dir_name, self.configs.fanout, self.configs.max_num_of_states_in_a_run(level_id), level_num_of_run, self.configs.size_ratio, self.configs.is_pruned);
-                let elapse = start.elapsed().as_nanos();
-                println!("flush time: {:?}", elapse);
+                // println!("flush time: {:?}", elapse);
                 match self.levels.get_mut(level_id as usize) {
                     Some(level_ref) => {
                         level_ref.run_vec.push(run); // push the new run to the end for efficiency, but query runs in the revert sort
@@ -235,15 +241,30 @@ impl<'a> ColePlus<'a> {
             }
             self.switch_in_mem_group();
             // iteratively merge the levels if the level reaches the capacity
-            let start = std::time::Instant::now();
             self.check_and_merge();
-            let elapse = start.elapsed().as_nanos();
-            println!("merge time: {:?}", elapse);
+            // println!("merge time: {:?}", elapse);
         }
     }
 
     // from the first disk level to the last disk level, check whether a level reaches the capacity, if so, merge all the runs in the level to the next level
-    pub fn check_and_merge(&mut self, ) {
+    pub fn check_and_merge(&mut self,) {
+        if self.configs.test_disk_roll == true {
+            // large rewind related code
+            if self.latest_block_id % 100 == 0 {
+                // for each 500 blocks, log the checkpoint
+                let mut levels_logs = vec![];
+                for level in &self.levels {
+                    let mut runs = vec![];
+                    for run in level.run_vec.iter() {
+                        runs.push((run.block_range_low, run.block_range_high));
+                    }
+                    levels_logs.push(runs);
+                }
+                let json_string = serde_json::to_string(&levels_logs).unwrap();
+                let log_file_name = self.get_block_range_checkpoint_log(self.latest_block_id);
+                fs::write(log_file_name, json_string).unwrap();
+            }
+        }
         let mut level_id = 0; // start from 0 disk level
         while level_id < self.levels.len() {
             if self.levels[level_id].level_reach_capacity(&self.configs) {
@@ -501,6 +522,10 @@ impl<'a> ColePlus<'a> {
             }
         }
     }
+
+    pub fn get_block_range_checkpoint_log(&self, block_id: u32) -> String {
+        format!("{}/ckp_{}.log", &self.configs.dir_name, block_id)
+    }
 }
 
 pub fn verify_and_collect_result(addr_key: AddrKey, lb: u32, ub: u32, root_hash: H256, proof: &ColePlusProof, fanout: usize) -> (bool, Option<Vec<VerObject>>) {
@@ -672,7 +697,7 @@ mod tests {
         std::fs::create_dir(dir_name).unwrap_or_default();
         let base_state_num = 500;
         let size_ratio = 2;
-        let configs = Configs::new(fanout, 0, dir_name.to_string(), base_state_num, size_ratio, true);
+        let configs = Configs::new(fanout, 0, dir_name.to_string(), base_state_num, size_ratio, true, false, false);
         let mut state_vec = Vec::<(CompoundKey, StateValue)>::new();
         let mut addr_key_vec = Vec::<AddrKey>::new();
         for _ in 1..=num_of_contract {
@@ -700,6 +725,52 @@ mod tests {
     }
 
     #[test]
+    fn test_block_range_cole_plus() {
+        let num_of_contract = 1;
+        let num_of_addr = 100;
+        let num_of_version = 100;
+        let mut rng = StdRng::seed_from_u64(1);
+        let fanout = 5;
+        let dir_name = "cole_storage";
+        if std::path::Path::new(dir_name).exists() {
+            std::fs::remove_dir_all(dir_name).unwrap_or_default();
+        }
+        std::fs::create_dir(dir_name).unwrap_or_default();
+        let base_state_num = 1000;
+        let size_ratio = 2;
+        let is_rolling = true;
+        let configs = Configs::new(fanout, 0, dir_name.to_string(), base_state_num, size_ratio, false, is_rolling, false);
+        let mut state_vec = Vec::<(CompoundKey, StateValue)>::new();
+        let mut addr_key_vec = Vec::<AddrKey>::new();
+        for _ in 1..=num_of_contract {
+            for _ in 1..=num_of_addr {
+                let acc_addr = H160::random_using(&mut rng);
+                let state_addr = H256::random_using(&mut rng);
+                let addr_key = AddrKey::new(Address(acc_addr), StateKey(state_addr));
+                addr_key_vec.push(addr_key);
+            }
+        }
+        for k in 1..=num_of_version {
+            for (i, addr_key) in addr_key_vec.iter().enumerate() {
+                state_vec.push((CompoundKey::new(*addr_key, k), StateValue(H256::from_low_u64_be( (k as u64 + i as u64) * 2))));
+            }
+        }
+
+        let mut cole_plus = ColePlus::new(&configs);
+        let mut cnt = 1;
+        for state in &state_vec {
+            cole_plus.insert((state.0.addr, state.0.version, state.1));
+            if cnt % 100 == 0 {
+                println!("cnt: {}",cnt);
+                println!("write group: {:?}", cole_plus.in_mem_group[cole_plus.get_write_in_mem_group_index()].max_block_id);
+                println!("merge group: {:?}", cole_plus.in_mem_group[cole_plus.get_merge_in_mem_group_index()].max_block_id);
+            }
+            
+            cnt += 1;
+        }
+    }
+
+    #[test]
     fn test_query_cole_plus() {
         let num_of_contract = 10;
         let num_of_addr = 100;
@@ -712,9 +783,9 @@ mod tests {
             std::fs::remove_dir_all(dir_name).unwrap_or_default();
         }
         std::fs::create_dir(dir_name).unwrap_or_default();
-        let base_state_num = 500;
+        let base_state_num = 1000;
         let size_ratio = 2;
-        let configs = Configs::new(fanout, 0, dir_name.to_string(), base_state_num, size_ratio, false);
+        let configs = Configs::new(fanout, 0, dir_name.to_string(), base_state_num, size_ratio, false, false, false);
         let mut state_vec = Vec::<(CompoundKey, StateValue)>::new();
         let mut addr_key_vec = Vec::<AddrKey>::new();
         for _ in 1..=num_of_contract {

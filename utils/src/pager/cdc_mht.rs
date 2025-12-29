@@ -1137,6 +1137,30 @@ impl CDCTree {
         return Ok(path);
     }
 
+    pub fn load_all_key_values(&self) -> Vec<VerObject> {
+        let mut result = Vec::<VerObject>::new();
+        let root = self.nodes.get(&self.root_h).unwrap();
+        let mut queue = VecDeque::new();
+        queue.push_back(root);
+        while !queue.is_empty() {
+            let node = queue.pop_front().unwrap();
+            match node {
+                CDCNode::Leaf(leaf) => {
+                    result.extend_from_slice(&leaf.objs);
+                },
+                CDCNode::NonLeaf(node) => {
+                    for child_hash in &node.child_hashes {
+                        let child_node_h = self.nodes.get(child_hash);
+                        if let Some(child_node_inner_h) = child_node_h {
+                            queue.push_back(child_node_inner_h);
+                        }
+                    }
+                }
+            }
+        }
+        return result;
+    }
+
     pub fn load_node(&self, node_hash: &H256) -> Option<&CDCNode> {
         self.nodes.get(node_hash)
     }

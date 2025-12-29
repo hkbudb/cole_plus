@@ -11,6 +11,12 @@ name = "latency"
 [[bin]]
 name = "prov"
 
+[[bin]]
+name = "short-reorg"
+
+[[bin]]
+name = "large-reorg"
+
 [lib]
 name = "locallib"
 path = "src/lib.rs"
@@ -30,3 +36,5 @@ json = "0.12.4"
 bincode = "1.3.3"
 chrono = "0.4.24"
 primitive-types = { version = "0.10.1", features = ["serde"] }
+once_cell = "1.7"
+cole-plus-ablation-binary-search = { version = "0.1.0", path = "../cole-plus-ablation-binary-search" }

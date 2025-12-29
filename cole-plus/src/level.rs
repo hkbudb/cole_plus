@@ -174,6 +174,8 @@ mod tests {
             base_state_num: n,
             size_ratio: 10,
             is_pruned: false,
+            test_in_mem_roll: false,
+            test_disk_roll: false,
         };
         let mut level = Level::new(level_id);
         for i in 0..2 {

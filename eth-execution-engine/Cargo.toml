@@ -30,3 +30,6 @@ patricia-trie = { version = "0.1.0", path = "../patricia-trie" }
 rocksdb = "0.22.0"
 letus_new = { version = "0.1.0", path = "../letus_new" }
 cxx = "1.0"
+pattern-oridented-split-tree = { version = "0.1.0", path = "../pattern-oridented-split-tree"}
+cole-plus-ablation-binary-search = { version = "0.1.0", path = "../cole-plus-ablation-binary-search" }
+caches = "0.2"

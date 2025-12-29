@@ -713,6 +713,8 @@ mod tests {
             base_state_num: n as usize,
             size_ratio: k as usize,
             is_pruned: false,
+            test_in_mem_roll: false,
+            test_disk_roll: false,
         };
 
         let mut run = LevelRun::construct_run_by_in_memory_merge(iters, run_id, level_id, &configs.dir_name, configs.epsilon, configs.fanout, configs.max_num_of_states_in_a_run(level_id), 1, k as usize);
@@ -783,6 +785,8 @@ mod tests {
             base_state_num: n as usize,
             size_ratio: k as usize,
             is_pruned: false,
+            test_in_mem_roll: false,
+            test_disk_roll: false,
         };
 
         let run = LevelRun::construct_run_by_in_memory_merge(iters, run_id, level_id, &configs.dir_name, configs.epsilon, configs.fanout, configs.max_num_of_states_in_a_run(level_id), 1, k as usize);
@@ -830,6 +834,8 @@ mod tests {
             base_state_num: n as usize,
             size_ratio: k as usize,
             is_pruned: false,
+            test_in_mem_roll: false,
+            test_disk_roll: false,
         };
 
         let run = LevelRun::construct_run_by_merge(iters, run_id, level_id, &configs.dir_name, configs.epsilon, configs.fanout, configs.max_num_of_states_in_a_run(level_id), 1, k as usize);
@@ -889,6 +895,8 @@ mod tests {
             base_state_num: n as usize,
             size_ratio: 1,
             is_pruned: false,
+            test_in_mem_roll: false,
+            test_disk_roll: false,
         };
 
         let run = LevelRun::construct_run_by_in_memory_merge(iters, run_id, level_id, &configs.dir_name, configs.epsilon, configs.fanout, configs.max_num_of_states_in_a_run(level_id), 1, 1);
