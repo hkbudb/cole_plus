@@ -10,12 +10,11 @@ size_ratio_default = 10
 mht_fanout_default = 4
 capacity_default = 1
 
-def latency_json_gen(workload, distribution, contract_name, index_name, mem_size, scale, num_of_contract, tx_in_block, size_ratio, epsilon, mht_fanout):
+def latency_json_gen(workload, ycsb_base_row_number, distribution, contract_name, index_name, mem_size, scale, num_of_contract, tx_in_block, size_ratio, epsilon, mht_fanout):
     db_path = "./%s/default_db" % workload
     if contract_name == "kvstore":
         result_path = "./%s/%s-%s" % (workload, workload, distribution)
         ycsb_path = "./%s/%s-%s-data.txt" % (workload, workload, distribution)
-        ycsb_base_row_number = 20000
         params_dict = { "index_name": index_name, "contract_name": contract_name, "scale": scale, "ycsb_path": ycsb_path, "ycsb_base_row_number": ycsb_base_row_number, "num_of_contract": num_of_contract, "tx_in_block": tx_in_block, "db_path": db_path, "mem_size": mem_size, "size_ratio": size_ratio, "epsilon": epsilon, "mht_fanout": mht_fanout, "result_path":result_path}
     elif contract_name == "smallbank":
         result_path = "./%s/%s" % (workload, workload)
@@ -157,7 +156,7 @@ def write_storage_json(cur_workload, distribution, cur_index, mem_size, cur_scal
     with open(storage_file_name, "w") as f:
         f.write("%s\n" % storage_json)
 
-def test_overall_kvstore(distribution, indexes, workloads):
+def test_overall_kvstore(distribution, ycsb_base_row_number, indexes, workloads):
     # workloads = ["writeonly", "readwriteeven", "readonly"]
     # workloads = ["writeonly"]
     # indexes = ["mpt_archive", "mpt_prune", "cole_star", "cole_plus_async_archive", "cole_plus_async_prune"]
@@ -169,12 +168,12 @@ def test_overall_kvstore(distribution, indexes, workloads):
             os.mkdir(cur_workload)
         for cur_scale in scale:
             for cur_index in indexes:
-                if cur_index == "cole_plus_async_archive" or cur_index == "cole_plus_async_prune" or cur_index == "cole_star" or cur_index == "cole_plus_ablation_siri" or cur_index == "cole_ablation_layout" or cur_index == "cole_plus_ablation_binary_search":
+                if cur_index == "cole_plus_async_archive" or cur_index == "cole_plus_async_prune" or cur_index == "cole_star" or cur_index == "cole_plus_ablation_siri" or cur_index == "cole_ablation_layout" or cur_index == "cole_plus_ablation_binary_search" or cur_index == "cole_plus_ablation_mbtree" or cur_index == "cole_plus_ablation_layout":
                     mem_size = 10000
                 else:
                     mem_size = 32
                 print("%s %s %s %s" % (cur_workload, distribution, cur_index, cur_scale))
-                params_file_path = latency_json_gen(workload=cur_workload, distribution=distribution, contract_name="kvstore", index_name=cur_index, mem_size=mem_size, scale=cur_scale, num_of_contract=1, tx_in_block=default_tx_in_block, size_ratio=size_ratio_default, epsilon=23, mht_fanout=mht_fanout_default)
+                params_file_path = latency_json_gen(workload=cur_workload, ycsb_base_row_number=ycsb_base_row_number, distribution=distribution, contract_name="kvstore", index_name=cur_index, mem_size=mem_size, scale=cur_scale, num_of_contract=1, tx_in_block=default_tx_in_block, size_ratio=size_ratio_default, epsilon=23, mht_fanout=mht_fanout_default)
                 os.system("cargo run --release --bin latency %s" % (params_file_path))
                 # compute storage
                 write_storage_json(cur_workload, distribution, cur_index, mem_size, cur_scale, mht_fanout_default, size_ratio_default)
@@ -201,23 +200,23 @@ def test_large_reorg(distribution):
         os.system("rm -rf ./large-reorg/default_db")
 
 
-def test_eth():
-    workloads = ["eth"]
-    indexes = ["mpt_archive"]
-    scale = [1000]
-    for cur_workload in workloads:
-        if not os.path.exists(cur_workload):
-            os.mkdir(cur_workload)
-        for cur_scale in scale:
-            for cur_index in indexes:
-                if cur_index == "cole_plus_async_archive" or cur_index == "cole_plus_async_prune" or cur_index == "cole_star":
-                    mem_size = 10000
-                else:
-                    mem_size = 32
-                print("%s %s %s" % (cur_workload, cur_index, cur_scale))
-                params_file_path = latency_json_gen(workload=cur_workload, distribution="", contract_name="eth", index_name=cur_index, mem_size=mem_size, scale=cur_scale, num_of_contract=1, tx_in_block=default_tx_in_block, size_ratio=size_ratio_default, epsilon=23, mht_fanout=mht_fanout_default)
-                os.system("cargo run --release --bin latency %s" % (params_file_path))
-                os.system("rm -rf ./%s/default_db" % cur_workload)
+# def test_eth():
+#     workloads = ["eth"]
+#     indexes = ["mpt_archive"]
+#     scale = [1000]
+#     for cur_workload in workloads:
+#         if not os.path.exists(cur_workload):
+#             os.mkdir(cur_workload)
+#         for cur_scale in scale:
+#             for cur_index in indexes:
+#                 if cur_index == "cole_plus_async_archive" or cur_index == "cole_plus_async_prune" or cur_index == "cole_star":
+#                     mem_size = 10000
+#                 else:
+#                     mem_size = 32
+#                 print("%s %s %s" % (cur_workload, cur_index, cur_scale))
+#                 params_file_path = latency_json_gen(workload=cur_workload, distribution="", contract_name="eth", index_name=cur_index, mem_size=mem_size, scale=cur_scale, num_of_contract=1, tx_in_block=default_tx_in_block, size_ratio=size_ratio_default, epsilon=23, mht_fanout=mht_fanout_default)
+#                 os.system("cargo run --release --bin latency %s" % (params_file_path))
+#                 os.system("rm -rf ./%s/default_db" % cur_workload)
 
 """ def test_overall_smallbank():
     workloads = ["smallbank"]
@@ -241,12 +240,12 @@ def test_eth():
                 write_storage_json(cur_workload, cur_index, mem_size, cur_scale, mht_fanout_default, size_ratio_default)
                 os.system("rm -rf ./%s/default_db" % cur_workload) """
 
-def test_prov(distribution):
+def test_prov(distribution, test_index):
     cur_workload = "prov"
     if not os.path.exists(cur_workload):
         os.mkdir(cur_workload)
     cur_scale = 20000000
-    test_index = ["mpt_archive"]
+    # test_index = ["mpt_archive", "cole_star", "cole_plus_async_archive"]
     for cur_index in test_index:
         print("test prov, index: %s" % (cur_index))
         if cur_index == "cole_plus_async_archive" or cur_index == "cole_plus_async_prune" or cur_index == "cole_star":
@@ -301,6 +300,7 @@ def test_mht_fanout(distribution):
 
 def test_size_ratio(distribution):
     cur_workload = "size_ratio"
+    ycsb_base_row_number = 20000
     if not os.path.exists(cur_workload):
         os.mkdir(cur_workload)
     test_index = ["cole_star", "cole_plus_async_archive"]
@@ -311,7 +311,7 @@ def test_size_ratio(distribution):
             mem_size = 10000
         for size_ratio in test_size_ratio:
             print("test size ratio, index: %s, size_ratio: %s" % (cur_index, size_ratio))
-            params_file_path = latency_json_gen(workload=cur_workload, distribution=distribution, contract_name="kvstore", index_name=cur_index, mem_size=mem_size, scale=cur_scale, num_of_contract=1, tx_in_block=default_tx_in_block, size_ratio=size_ratio, epsilon=23, mht_fanout=mht_fanout_default)
+            params_file_path = latency_json_gen(workload=cur_workload,ycsb_base_row_number=ycsb_base_row_number, distribution=distribution, contract_name="kvstore", index_name=cur_index, mem_size=mem_size, scale=cur_scale, num_of_contract=1, tx_in_block=default_tx_in_block, size_ratio=size_ratio, epsilon=23, mht_fanout=mht_fanout_default)
             os.system("cargo run --release --bin latency %s" % (params_file_path))
             # compute storage
             # write_storage_json(cur_workload, distribution, cur_index, mem_size, cur_scale, mht_fanout_default, size_ratio)
@@ -337,48 +337,41 @@ def test_size_ratio(distribution):
             write_storage_json(cur_workload, distribution, cur_index, mem_size, cur_scale, mht_fanout_default, size_ratio_default)
             os.system("rm -rf ./%s/default_db" % cur_workload) """
 
-def test_merge_time(distribution, workloads):
-    indexes = ["cole_plus_archive"]
-    scale = [1200000]
-    for cur_workload in workloads:
-        if not os.path.exists(cur_workload):
-            os.mkdir(cur_workload)
-        for cur_scale in scale:
-            for cur_index in indexes:
-                mem_size = 10000
-                print("%s %s %s %s" % (cur_workload, distribution, cur_index, cur_scale))
-                params_file_path = latency_json_gen(workload=cur_workload, distribution=distribution, contract_name="kvstore", index_name=cur_index, mem_size=mem_size, scale=cur_scale, num_of_contract=1, tx_in_block=default_tx_in_block, size_ratio=size_ratio_default, epsilon=23, mht_fanout=mht_fanout_default)
-                os.system("cargo run --release --bin latency %s" % (params_file_path))
-                # compute storage
-                # write_storage_json(cur_workload, distribution, cur_index, mem_size, cur_scale, mht_fanout_default, size_ratio_default)
-                os.system("rm -rf ./%s/default_db" % cur_workload)
+# def test_merge_time(distribution, workloads):
+#     indexes = ["cole_plus_archive"]
+#     scale = [1200000]
+#     for cur_workload in workloads:
+#         if not os.path.exists(cur_workload):
+#             os.mkdir(cur_workload)
+#         for cur_scale in scale:
+#             for cur_index in indexes:
+#                 mem_size = 10000
+#                 print("%s %s %s %s" % (cur_workload, distribution, cur_index, cur_scale))
+#                 params_file_path = latency_json_gen(workload=cur_workload, distribution=distribution, contract_name="kvstore", index_name=cur_index, mem_size=mem_size, scale=cur_scale, num_of_contract=1, tx_in_block=default_tx_in_block, size_ratio=size_ratio_default, epsilon=23, mht_fanout=mht_fanout_default)
+#                 os.system("cargo run --release --bin latency %s" % (params_file_path))
+#                 # compute storage
+#                 # write_storage_json(cur_workload, distribution, cur_index, mem_size, cur_scale, mht_fanout_default, size_ratio_default)
+#                 os.system("rm -rf ./%s/default_db" % cur_workload)
 
 
 if __name__ == "__main__":
-    # test_mht_fanout("uniform")
-    # test_size_ratio("uniform")
-    # test_prov("uniform")
-    # test_overall_kvstore("uniform", ["writeonly", "readwriteeven", "readonly"])
-    # test_overall_kvstore("zipfian", ["readwriteeven", "readonly"])
-    # test_overall_kvstore("uniform", ["writeonly"])
-    # test_merge_time("uniform", ["writeonly"])
+    # test overall performance
+    ycsb_base_row_number = 20000
+    test_overall_kvstore("uniform", ycsb_base_row_number, ["cole_plus_async_prune", "cole_star", "mpt_archive"], ["writeonly"])
 
-    # test_overall_kvstore("uniform", ["cole_ablation_layout"], ["readonly"])
-    # test_overall_kvstore("uniform", ["cole_plus_ablation_siri"], ["writeonly"])
+    # test workloads
+    ycsb_base_row_number = 20000
+    test_overall_kvstore("uniform", ycsb_base_row_number, ["cole_plus_async_prune", "cole_star", "mpt_archive"], ["writeonly", "readwriteeven", "readonly"])
 
-    #test_short_reorg("uniform")
-    # test_overall_kvstore("uniform", ["cole_plus_ablation_siri"], ["writeonly"])
-    # test_overall_kvstore("uniform", ["cole_plus_ablation_siri", "cole_plus_async_archive"], ["writeheavy"])
-
-
-    # #1 test siri 
-    # test_overall_kvstore("uniform", ["cole_plus_ablation_siri"], ["writeonly"])
-    # test_overall_kvstore("uniform", ["cole_plus_ablation_siri", "cole_plus_async_archive"], ["writeheavy"])
+    # test provenance
+    # test_prov("uniform", ["mpt_archive", "cole_star", "cole_plus_async_archive"])
     
-    # # 2 cole_plus_ablation_binary_search
-    # test_overall_kvstore("uniform", ["cole_plus_ablation_binary_search"], ["readwriteeven"])
-    # test_overall_kvstore("uniform", ["cole_plus_ablation_binary_search", "cole_plus_async_archive"], ["readheavy"])
-
-    # # 3 larg reorg
+    # test large reorg
     # test_large_reorg("uniform")
-    pass
+
+    # test short reorg
+    # test_short_reorg("uniform")
+
+    # test ablation
+    # test_overall_kvstore("uniform", ycsb_base_row_number, ["cole_plus_ablation_siri", "cole_plus_ablation_binary_search", "cole_ablation_layout", "cole_plus_ablation_mbtree"], ["readwriteeven"])
+    

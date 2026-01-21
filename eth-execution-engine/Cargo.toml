@@ -33,3 +33,4 @@ cxx = "1.0"
 pattern-oridented-split-tree = { version = "0.1.0", path = "../pattern-oridented-split-tree"}
 cole-plus-ablation-binary-search = { version = "0.1.0", path = "../cole-plus-ablation-binary-search" }
 caches = "0.2"
+cole-plus-ablation-mbtree = { version = "0.1.0", path = "../cole-plus-ablation-mbtree" }

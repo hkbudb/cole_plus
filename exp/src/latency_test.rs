@@ -7,6 +7,7 @@ use eth_execution_engine::{mpt_backend::MPTExecutorBackend, cole_index_backend::
 use eth_execution_engine::cole_plus_ablation_siri_backend::ColePlusSIRIBackend;
 use eth_execution_engine::cole_ablation_layout_backend::ColeAblationLayoutBackend;
 use eth_execution_engine::cole_plus_ablation_binary_search::ColePlusBinarySearchBackend;
+use eth_execution_engine::cole_plus_ablation_mbtree_backend::ColePlusAblationMBTreeBackend;
 use utils::{types::Address, config::Configs};
 use rand::prelude::*;
 use rocksdb::{OptimisticTransactionDB, Options, SingleThreaded};
@@ -395,6 +396,20 @@ pub fn test_cole_plus_ablation_binary_search_latency(params: &LatencyParams) -> 
     Ok(())
 }
 
+pub fn test_cole_plus_ablation_mbtree_latency(params: &LatencyParams) -> Result<()> {
+    let db_path = params.db_path.as_str();
+    if Path::new(db_path).exists() {
+        std::fs::remove_dir_all(db_path).unwrap_or_default();
+    }
+    std::fs::create_dir(db_path).unwrap_or_default();
+
+    // note that here the mem_size is the number of records in the memory, rather than the actual size like 64 MB
+    let configs = Configs::new(params.mht_fanout, params.epsilon as i64, db_path.to_string(), params.mem_size, params.size_ratio, false, false, false);
+    let backend = ColePlusAblationMBTreeBackend::new(&configs, db_path);
+    test_backend_latency(params, backend).unwrap();
+    Ok(())
+}
+
 pub fn test_index_backend_latency(params: &LatencyParams) -> Result<()> {
     let index_name = &params.index_name;
     if index_name == "mpt_archive" {
@@ -424,6 +439,9 @@ pub fn test_index_backend_latency(params: &LatencyParams) -> Result<()> {
     }
     else if index_name == "cole_plus_ablation_binary_search" {
         test_cole_plus_ablation_binary_search_latency(params)
+    }
+    else if index_name == "cole_plus_ablation_mbtree" {
+        test_cole_plus_ablation_mbtree_latency(params)
     }
     else {
         Err(anyhow!("wrong index name"))

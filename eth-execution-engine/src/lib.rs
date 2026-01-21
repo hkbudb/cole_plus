@@ -12,6 +12,7 @@ pub mod letus_backend;
 pub mod cole_plus_ablation_siri_backend;
 pub mod cole_ablation_layout_backend;
 pub mod cole_plus_ablation_binary_search;
+pub mod cole_plus_ablation_mbtree_backend;
 #[cfg(test)]
 mod tests {
 
